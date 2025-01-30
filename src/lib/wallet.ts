@@ -5,6 +5,29 @@ import { createInfuraProvider } from './infura';
 import { Network } from '../types';
 import { Database } from '../types/supabase';
 
+// Retry configuration for database operations
+const DB_RETRY_COUNT = 3;
+const DB_RETRY_DELAY = 1000;
+
+async function retryDatabaseOperation<T>(operation: () => Promise<T>): Promise<T> {
+  let lastError: Error | null = null;
+  
+  for (let attempt = 0; attempt < DB_RETRY_COUNT; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Unknown error');
+      console.warn(`Database operation failed (attempt ${attempt + 1}/${DB_RETRY_COUNT}):`, lastError);
+      
+      if (attempt < DB_RETRY_COUNT - 1) {
+        await new Promise(resolve => setTimeout(resolve, DB_RETRY_DELAY * Math.pow(2, attempt)));
+      }
+    }
+  }
+  
+  throw lastError || new Error('Database operation failed after maximum retries');
+}
+
 interface WalletGenerationLog {
   timestamp: string;
   status: 'success' | 'error';
@@ -234,7 +257,7 @@ export async function generateWallets(count: number = 100, network: Network) {
 }
 
 export async function getWalletCount(): Promise<number> {
-  return retryOperation(async () => {
+  return retryDatabaseOperation(async () => {
     console.log('Fetching wallet count...');
     
     const { count, error } = await supabase
@@ -257,7 +280,7 @@ export async function getWalletCount(): Promise<number> {
 }
 
 export async function getWalletsByStatus(status: string) {
-  return retryOperation(async () => {
+  return retryDatabaseOperation(async () => {
     console.log('Fetching wallets by status:', { status });
     
     const { data, error } = await supabase
@@ -292,11 +315,8 @@ export async function getWallets(filter: {
   page: number;
   limit: number;
 }) {
-  return retryOperation(async () => {
-    console.log('Fetching wallets with filter:', {
-      ...filter,
-      query: filter.search ? `search: ${filter.search}` : undefined
-    });
+  return retryDatabaseOperation(async () => {
+    console.log('Fetching wallets with filter:', filter);
     
     try {
       let query = supabase

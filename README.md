@@ -1,49 +1,144 @@
-# Wallet Generation Service
+# Token Gating Dashboard
 
-## Supabase Configuration Best Practices
+A comprehensive dashboard for managing and monitoring wallet operations with support for multiple networks and Reown integration.
 
-1. **Authentication**
-   - Use service role key for backend operations
-   - Never expose service role key in client-side code
-   - Keep anon key for public endpoints only
+## Features
 
-2. **Client Configuration**
-   - Keep configuration minimal
-   - Disable session persistence for service role usage
-   - Use environment variables for all sensitive data
+- Multi-network wallet management
+- Secure wallet generation and storage
+- Reown integration for wallet connections
+- Real-time connection monitoring
+- Transaction signing and monitoring
+- Tag management for wallets
+- Comprehensive filtering and search
+- Pagination support
+
+## Architecture
+
+The application is built with:
+
+- React + TypeScript for the frontend
+- Supabase for database and authentication
+- Reown for wallet connections
+- Ethers.js for blockchain interactions
+- TailwindCSS for styling
+
+### Key Components
+
+1. **Dashboard**
+   - Main interface for wallet management
+   - Real-time stats and monitoring
+   - Wallet generation and connection
+
+2. **Reown Integration**
+   - Secure wallet connections
+   - Transaction signing
+   - Session management
+
+3. **Database Layer**
+   - Secure wallet storage
+   - API key management
+   - Transaction tracking
+
+## Setup
+
+1. Environment Variables
+
+```env
+VITE_SUPABASE_URL=your_supabase_url
+VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+VITE_SUPABASE_ROLE=your_supabase_service_role
+VITE_REOWN_PROJECT_ID=your_reown_project_id
+```
+
+2. Install Dependencies
+
+```bash
+npm install
+```
+
+3. Start Development Server
+
+```bash
+npm run dev
+```
+
+## Security
+
+- Private keys are encrypted before storage
+- Row Level Security enabled in Supabase
+- Secure key management for API providers
+- Auto-disconnect protection
+- Request signing validation
+
+## Testing
+
+Run the test suite:
+
+```bash
+npm test
+```
+
+## Best Practices
+
+1. **Wallet Management**
+   - Always validate network compatibility
+   - Implement proper error handling
+   - Monitor connection status
+   - Secure private key handling
+
+2. **Database Operations**
+   - Use prepared statements
+   - Implement row-level security
+   - Regular backup procedures
+   - Monitor API key usage
 
 3. **Error Handling**
-   - Implement proper error logging
-   - Use try-catch blocks for all database operations
-   - Log errors with context and timestamps
+   - Comprehensive error logging
+   - User-friendly error messages
+   - Automatic retry mechanisms
+   - Connection status monitoring
 
-## Wallet Generation Best Practices
+## API Documentation
 
-1. **Security**
-   - Use cryptographically secure random number generation
-   - Encrypt private keys and mnemonics before storage
-   - Never log or expose unencrypted sensitive data
+### Wallet Management
 
-2. **Performance**
-   - Generate wallets in small batches (10 at a time)
-   - Implement proper error handling for each wallet
-   - Log success and failure rates
+```typescript
+interface WalletGenerationOptions {
+  count: number;
+  network: Network;
+}
 
-3. **Monitoring**
-   - Keep detailed generation logs
-   - Track success/failure rates
-   - Monitor database connection status
+interface WalletConnectionOptions {
+  uri: string;
+  walletId: string;
+  network: Network;
+  autoSign?: boolean;
+}
+```
 
-## Environment Variables
+### Network Support
 
-Required environment variables:
-- `VITE_SUPABASE_URL`: Supabase project URL
-- `VITE_SUPABASE_ROLE`: Service role key for authenticated operations
+The dashboard supports multiple networks including:
+- Ethereum
+- Polygon
+- Arbitrum
+- Base
+- Linea
+- BNB Chain
+- Avalanche
+- Celo
+- Blast
+- SKALE
 
-## Error Handling
+## Contributing
 
-The application implements comprehensive error handling:
-- Connection testing before operations
-- Detailed error logging with timestamps
-- User-friendly error messages in UI
-- Batch operation error recovery
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
+
+## License
+
+MIT License

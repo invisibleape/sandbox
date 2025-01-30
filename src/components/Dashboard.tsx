@@ -1,15 +1,35 @@
-import React, { useState, useEffect } from 'react';
-import { BarChart3, Wallet as WalletIcon, Activity, CheckCircle, Loader2, Copy, AlertCircle, ExternalLink, Tag, Search, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { BarChart3, Wallet as WalletIcon, Activity, CheckCircle, Loader2, Copy, AlertCircle, ExternalLink, Tag, Search, ChevronLeft, ChevronRight, RefreshCw, Clock } from 'lucide-react';
 import { WalletStats, Network } from '../types';
 import { generateWallets, getWalletCount, getWallets, formatAddress } from '../lib/wallet';
 import { isSupabaseConfigured, testSupabaseConnection, supabase } from '../lib/supabase';
 import { networks } from '../lib/networks';
 import { NetworkSelector } from './NetworkSelector';
-import { WalletConnectModal } from './WalletConnectModal';
+import { ReownModal } from './ReownModal';
 import { ConnectionStatus } from './ConnectionStatus';
-import { connectWalletConnect } from '../lib/walletconnect';
+import { connectWallet } from '../lib/auth';
 import { decryptPrivateKey } from '../lib/crypto';
 import { getInfuraKey } from '../lib/infura';
+import { getWalletKit } from '../lib/walletkit';
+
+const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const DEBOUNCE_DELAY = 300; // 300ms for search/filter debouncing
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
 
 const StatsCard = ({ title, value, icon: Icon }: { title: string; value: number; icon: React.ElementType }) => (
   <div className="bg-white rounded-lg p-6 shadow-md">
@@ -23,7 +43,7 @@ const StatsCard = ({ title, value, icon: Icon }: { title: string; value: number;
   </div>
 );
 
-export function Dashboard() {
+function Dashboard() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -45,13 +65,80 @@ export function Dashboard() {
   const [filterNetwork, setFilterNetwork] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isWalletConnectModalOpen, setIsWalletConnectModalOpen] = useState(false);
+  const [isReownModalOpen, setIsReownModalOpen] = useState(false);
   const [selectedWalletId, setSelectedWalletId] = useState<string | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+
+  const debouncedSearch = useDebounce(search, DEBOUNCE_DELAY);
+  const debouncedFilterNetwork = useDebounce(filterNetwork, DEBOUNCE_DELAY);
+  const debouncedFilterStatus = useDebounce(filterStatus, DEBOUNCE_DELAY);
+
+  const refreshData = useCallback(async (showLoading = true) => {
+    if (!isConnected) return;
+
+    try {
+      if (showLoading) {
+        setIsLoading(true);
+      }
+
+      const totalWallets = await getWalletCount();
+      
+      const { data: wallets, count, totalPages: pages } = await getWallets({
+        search: debouncedSearch,
+        network: debouncedFilterNetwork,
+        status: debouncedFilterStatus,
+        page: currentPage,
+        limit: 10
+      });
+      
+      if (wallets) {
+        setRecentWallets(wallets);
+        setTotalPages(pages);
+        
+        const connected = wallets.filter(w => w.status === 'connected').length;
+        const minting = wallets.filter(w => w.status === 'minting').length;
+        const completed = wallets.filter(w => w.status === 'completed').length;
+        
+        setStats({
+          totalWallets,
+          connectedWallets: connected,
+          mintingWallets: minting,
+          completedWallets: completed,
+        });
+        
+        setError(null);
+      }
+      
+      setLastRefreshed(new Date());
+    } catch (err) {
+      console.error('Error refreshing data:', err);
+      setError('Failed to fetch wallet data. Please try again.');
+    } finally {
+      if (showLoading) {
+        setIsLoading(false);
+      }
+    }
+  }, [isConnected, debouncedSearch, debouncedFilterNetwork, debouncedFilterStatus, currentPage]);
 
   useEffect(() => {
     checkConnection();
   }, []);
+
+  useEffect(() => {
+    if (!autoRefreshEnabled) return;
+
+    const intervalId = setInterval(() => {
+      refreshData(false);
+    }, REFRESH_INTERVAL);
+
+    return () => clearInterval(intervalId);
+  }, [refreshData, autoRefreshEnabled]);
+
+  useEffect(() => {
+    refreshData();
+  }, [debouncedSearch, debouncedFilterNetwork, debouncedFilterStatus, currentPage, refreshData]);
 
   const checkConnection = async () => {
     if (!isSupabaseConfigured()) {
@@ -66,57 +153,11 @@ export function Dashboard() {
     if (connected) {
       const infuraKey = await getInfuraKey();
       setHasInfuraKey(!!infuraKey);
-      refreshStats();
+      refreshData();
     } else {
       setError('Unable to connect to Supabase. Please check your connection and try again.');
     }
   };
-
-  const refreshStats = async () => {
-    if (!isConnected) return;
-
-    try {
-      setIsLoading(true);
-      const totalWallets = await getWalletCount();
-      
-      const { data: wallets, count, totalPages: pages } = await getWallets({
-        search,
-        network: filterNetwork,
-        status: filterStatus,
-        page: currentPage,
-        limit: 10
-      });
-      
-      setRecentWallets(wallets);
-      setTotalPages(pages);
-      
-      const connected = wallets.filter(w => w.status === 'connected').length;
-      const minting = wallets.filter(w => w.status === 'minting').length;
-      const completed = wallets.filter(w => w.status === 'completed').length;
-      
-      setStats({
-        totalWallets,
-        connectedWallets: connected,
-        mintingWallets: minting,
-        completedWallets: completed,
-      });
-      
-      setError(null);
-    } catch (err) {
-      console.error('Error refreshing stats:', err);
-      setError('Failed to fetch wallet data. Please try again.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      refreshStats();
-    }, 300);
-
-    return () => clearTimeout(timer);
-  }, [search, filterNetwork, filterStatus, currentPage]);
 
   const handleGenerateWallets = async () => {
     if (!isConnected) {
@@ -145,7 +186,7 @@ export function Dashboard() {
     try {
       const { data, error: genError } = await generateWallets(walletCount, selectedNetwork);
       if (genError) throw genError;
-      await refreshStats();
+      await refreshData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to generate wallets');
     } finally {
@@ -187,7 +228,7 @@ export function Dashboard() {
         return;
       }
       
-      await refreshStats();
+      await refreshData();
       setEditingTag(null);
       setError(null);
     } catch (err) {
@@ -202,7 +243,22 @@ export function Dashboard() {
   };
 
   const handleRefresh = () => {
-    refreshStats();
+    refreshData();
+  };
+
+  const formatTimeAgo = (date: Date) => {
+    const now = new Date();
+    const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+    
+    if (diffInSeconds < 60) {
+      return 'just now';
+    } else if (diffInSeconds < 3600) {
+      const minutes = Math.floor(diffInSeconds / 60);
+      return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+    } else {
+      const hours = Math.floor(diffInSeconds / 3600);
+      return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    }
   };
 
   const handleWalletConnect = async (uri: string, autoSign?: boolean) => {
@@ -225,18 +281,8 @@ export function Dashboard() {
         throw new Error(`Network ${wallet.network} not supported`);
       }
 
-      const privateKey = await decryptPrivateKey(wallet.private_key);
-
-      await connectWalletConnect({
-        uri,
-        walletId: selectedWalletId,
-        network,
-        privateKey,
-        autoSign
-      });
-
-      await refreshStats();
-      setIsWalletConnectModalOpen(false);
+      await connectWallet(uri, selectedWalletId, network, autoSign);
+      await refreshData();
     } catch (err) {
       console.error('Failed to connect wallet:', err);
       setError(err instanceof Error ? err.message : 'Failed to connect wallet');
@@ -254,23 +300,40 @@ export function Dashboard() {
               <h1 className="text-3xl font-bold text-gray-900">Token Gating Test Dashboard</h1>
               <p className="mt-2 text-gray-600">Monitor and manage your wallet operations</p>
             </div>
-            <button
-              onClick={handleRefresh}
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
-              disabled={isLoading}
-            >
-              {isLoading ? (
-                <>
-                  <Loader2 className="animate-spin -ml-1 mr-2 h-4 w-4" />
-                  Refreshing...
-                </>
-              ) : (
-                <>
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                  Refresh Data
-                </>
-              )}
-            </button>
+            <div className="flex flex-col items-end gap-2">
+              <button
+                onClick={handleRefresh}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <>
+                    <Loader2 className="animate-spin -ml-1 mr-2 h-4 w-4" />
+                    Refreshing...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                    Refresh Data
+                  </>
+                )}
+              </button>
+              <div className="flex items-center gap-2 text-sm text-gray-500">
+                <Clock className="w-4 h-4" />
+                <span>Last refreshed: {formatTimeAgo(lastRefreshed)}</span>
+                <button
+                  onClick={() => setAutoRefreshEnabled(!autoRefreshEnabled)}
+                  className={`px-2 py-1 rounded text-xs font-medium ${
+                    autoRefreshEnabled 
+                      ? 'bg-green-100 text-green-800' 
+                      : 'bg-gray-100 text-gray-800'
+                  }`}
+                  title={autoRefreshEnabled ? 'Auto-refresh enabled' : 'Auto-refresh disabled'}
+                >
+                  {autoRefreshEnabled ? 'Auto' : 'Manual'}
+                </button>
+              </div>
+            </div>
           </div>
 
           {!hasInfuraKey && (
@@ -419,6 +482,9 @@ export function Dashboard() {
             <table className="min-w-full divide-y divide-gray-200">
               <thead>
                 <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-10">
+                    {/* Empty header for connection status */}
+                  </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Wallet Address
                   </th>
@@ -437,14 +503,21 @@ export function Dashboard() {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Tag
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Connection
-                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {recentWallets.map((wallet) => (
                   <tr key={wallet.id}>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <ConnectionStatus 
+                        walletId={wallet.id}
+                        onStatusChange={(isConnected) => {
+                          if (!isConnected) {
+                            refreshData();
+                          }
+                        }}
+                      />
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center space-x-2">
                         <span className="text-sm font-mono text-gray-900">
@@ -460,7 +533,7 @@ export function Dashboard() {
                         <button
                           onClick={() => {
                             setSelectedWalletId(wallet.id);
-                            setIsWalletConnectModalOpen(true);
+                            setIsReownModalOpen(true);
                           }}
                           className="text-indigo-600 hover:text-indigo-800 transition-colors"
                           title="Connect with WalletConnect"
@@ -533,16 +606,6 @@ export function Dashboard() {
                         </div>
                       )}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <ConnectionStatus 
-                        walletId={wallet.id}
-                        onStatusChange={(isConnected) => {
-                          if (!isConnected) {
-                            refreshStats();
-                          }
-                        }}
-                      />
-                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -580,15 +643,18 @@ export function Dashboard() {
           )}
         </div>
       </div>
-      <WalletConnectModal
-        isOpen={isWalletConnectModalOpen}
+      <ReownModal
+        isOpen={isReownModalOpen}
         onClose={() => {
-          setIsWalletConnectModalOpen(false);
+          setIsReownModalOpen(false);
           setSelectedWalletId(null);
         }}
         onConnect={handleWalletConnect}
         isConnecting={isConnecting}
+        walletId={selectedWalletId}
       />
     </div>
   );
 }
+
+export default Dashboard;
