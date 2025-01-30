@@ -1,16 +1,14 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { BarChart3, Wallet as WalletIcon, Activity, CheckCircle, Loader2, Copy, AlertCircle, ExternalLink, Tag, Search, ChevronLeft, ChevronRight, RefreshCw, Clock } from 'lucide-react';
+import { BarChart3, Wallet as WalletIcon, Activity, CheckCircle, Loader2, Copy, AlertCircle, ExternalLink, Tag, Search, ChevronLeft, ChevronRight, RefreshCw, Clock, Mail } from 'lucide-react';
 import { WalletStats, Network } from '../types';
 import { generateWallets, getWalletCount, getWallets, formatAddress } from '../lib/wallet';
 import { isSupabaseConfigured, testSupabaseConnection, supabase } from '../lib/supabase';
 import { networks } from '../lib/networks';
 import { NetworkSelector } from './NetworkSelector';
 import { ReownModal } from './ReownModal';
+import { EmailModal } from './EmailModal';
 import { ConnectionStatus } from './ConnectionStatus';
 import { connectWallet } from '../lib/auth';
-import { decryptPrivateKey } from '../lib/crypto';
-import { getInfuraKey } from '../lib/infura';
-import { getWalletKit } from '../lib/walletkit';
 
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const DEBOUNCE_DELAY = 300; // 300ms for search/filter debouncing
@@ -70,6 +68,8 @@ function Dashboard() {
   const [isConnecting, setIsConnecting] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
+  const [selectedEmailWalletId, setSelectedEmailWalletId] = useState<string | null>(null);
 
   const debouncedSearch = useDebounce(search, DEBOUNCE_DELAY);
   const debouncedFilterNetwork = useDebounce(filterNetwork, DEBOUNCE_DELAY);
@@ -151,8 +151,15 @@ function Dashboard() {
     setIsConnected(connected);
     
     if (connected) {
-      const infuraKey = await getInfuraKey();
-      setHasInfuraKey(!!infuraKey);
+      const { data } = await supabase
+        .from('api_keys')
+        .select('key')
+        .eq('provider', 'infura')
+        .eq('is_active', true)
+        .limit(1)
+        .single();
+      
+      setHasInfuraKey(!!data?.key);
       refreshData();
     } else {
       setError('Unable to connect to Supabase. Please check your connection and try again.');
@@ -202,17 +209,6 @@ function Dashboard() {
     } catch (err) {
       console.error('Failed to copy:', err);
     }
-  };
-
-  const getStatusColor = (status: string) => {
-    const colors = {
-      created: 'bg-blue-100 text-blue-800',
-      connected: 'bg-green-100 text-green-800',
-      minting: 'bg-yellow-100 text-yellow-800',
-      completed: 'bg-indigo-100 text-indigo-800',
-      failed: 'bg-red-100 text-red-800',
-    } as const;
-    return colors[status as keyof typeof colors] || 'bg-gray-100 text-gray-800';
   };
 
   const handleTagUpdate = async (walletId: string, newTag: string) => {
@@ -289,6 +285,17 @@ function Dashboard() {
     } finally {
       setIsConnecting(false);
     }
+  };
+
+  const getStatusColor = (status: string) => {
+    const colors = {
+      created: 'bg-blue-100 text-blue-800',
+      connected: 'bg-green-100 text-green-800',
+      minting: 'bg-yellow-100 text-yellow-800',
+      completed: 'bg-indigo-100 text-indigo-800',
+      failed: 'bg-red-100 text-red-800',
+    } as const;
+    return colors[status as keyof typeof colors] || 'bg-gray-100 text-gray-800';
   };
 
   return (
@@ -540,6 +547,16 @@ function Dashboard() {
                         >
                           <WalletIcon className="w-4 h-4" />
                         </button>
+                        <button
+                          onClick={() => {
+                            setSelectedEmailWalletId(wallet.id);
+                            setIsEmailModalOpen(true);
+                          }}
+                          className="text-blue-600 hover:text-blue-800 transition-colors"
+                          title="Temporary Email"
+                        >
+                          <Mail className="w-4 h-4" />
+                        </button>
                         {copiedAddress === wallet.address && (
                           <span className="text-xs text-green-600">Copied!</span>
                         )}
@@ -643,6 +660,7 @@ function Dashboard() {
           )}
         </div>
       </div>
+
       <ReownModal
         isOpen={isReownModalOpen}
         onClose={() => {
@@ -652,6 +670,15 @@ function Dashboard() {
         onConnect={handleWalletConnect}
         isConnecting={isConnecting}
         walletId={selectedWalletId}
+      />
+
+      <EmailModal
+        isOpen={isEmailModalOpen}
+        onClose={() => {
+          setIsEmailModalOpen(false);
+          setSelectedEmailWalletId(null);
+        }}
+        walletId={selectedEmailWalletId}
       />
     </div>
   );

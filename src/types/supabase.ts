@@ -23,6 +23,10 @@ export interface Database {
           first_transaction_at: string | null
           last_transaction_at: string | null
           transaction_count: number
+          email: string | null
+          email_hash: string | null
+          email_domain: string | null
+          email_created_at: string | null
         }
         Insert: {
           id?: string
@@ -37,6 +41,10 @@ export interface Database {
           first_transaction_at?: string | null
           last_transaction_at?: string | null
           transaction_count?: number
+          email?: string | null
+          email_hash?: string | null
+          email_domain?: string | null
+          email_created_at?: string | null
         }
         Update: {
           id?: string
@@ -51,6 +59,10 @@ export interface Database {
           first_transaction_at?: string | null
           last_transaction_at?: string | null
           transaction_count?: number
+          email?: string | null
+          email_hash?: string | null
+          email_domain?: string | null
+          email_created_at?: string | null
         }
       }
       api_keys: {
