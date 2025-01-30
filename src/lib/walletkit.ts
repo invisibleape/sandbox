@@ -1,0 +1,468 @@
+import { Core } from '@walletconnect/core';
+import { WalletKit } from '@reown/walletkit';
+import { supabase } from './supabase';
+import { decryptPrivateKey } from './crypto';
+import { ethers } from 'ethers';
+import { ReownKit } from '../types/reown';
+import { formatAddress } from './wallet';
+import { storeLog } from './logs';
+
+let walletKit: ReownKit | null = null;
+let currentWalletId: string | null = null;
+
+// Track active sessions with their topics
+const activeSessions = new Map<string, {
+  walletId: string;
+  address: string;
+  chainId: number;
+  privateKey: string;
+  topics: Set<string>; // Store all related topics
+  autoSign: boolean;
+}>();
+
+function emitLog(type: 'info' | 'success' | 'error' | 'pending', message: string, details?: any) {
+  if (!currentWalletId) {
+    console.warn('No wallet ID set for log:', message);
+    return;
+  }
+
+  const log = {
+    id: crypto.randomUUID(),
+    timestamp: Date.now(),
+    type,
+    message: details ? `${message}: ${JSON.stringify(details)}` : message,
+    walletId: currentWalletId,
+    details
+  };
+
+  window.dispatchEvent(
+    new CustomEvent('reown:log', { detail: log })
+  );
+
+  // Store log in database
+  storeLog(log, currentWalletId).catch(error => {
+    console.error('Failed to store log:', error);
+  });
+}
+
+async function updateWalletStatus(walletId: string, status: 'created' | 'connected' | 'minting' | 'completed' | 'failed') {
+  try {
+    const { error } = await supabase
+      .from('wallets')
+      .update({ status })
+      .eq('id', walletId);
+
+    if (error) {
+      throw error;
+    }
+
+    emitLog('info', `Updated wallet status to ${status}`, { walletId });
+  } catch (error) {
+    emitLog('error', 'Failed to update wallet status', { error: error instanceof Error ? error.message : 'Unknown error' });
+  }
+}
+
+async function setupEventHandlers(kit: ReownKit) {
+  kit.on('session_proposal', async (event) => {
+    try {
+      // Extract topics from event
+      const pairingTopic = event.params?.pairingTopic;
+      const proposalId = event.id?.toString();
+
+      emitLog('info', 'Received session proposal', {
+        id: proposalId,
+        pairingTopic,
+        params: event.params
+      });
+
+      if (!pairingTopic || !proposalId) {
+        throw new Error('Missing required proposal data');
+      }
+
+      if (!currentWalletId) {
+        throw new Error('No wallet selected');
+      }
+
+      // Get wallet details
+      const { data: wallet, error: fetchError } = await supabase
+        .from('wallets')
+        .select('*')
+        .eq('id', currentWalletId)
+        .single();
+
+      if (fetchError || !wallet) {
+        throw new Error(`Failed to fetch wallet: ${fetchError?.message}`);
+      }
+
+      emitLog('info', 'Retrieved wallet details', {
+        address: formatAddress(wallet.address),
+        network: wallet.network,
+        chainId: wallet.chain_id
+      });
+
+      // Decrypt private key
+      const privateKey = await decryptPrivateKey(wallet.private_key);
+
+      // Create session with all possible topics
+      const session = {
+        walletId: wallet.id,
+        address: wallet.address.toLowerCase(),
+        chainId: wallet.chain_id,
+        privateKey,
+        topics: new Set([pairingTopic, proposalId]),
+        autoSign: true // Default to auto-sign enabled
+      };
+
+      // Store session with all possible topic keys
+      for (const topic of session.topics) {
+        activeSessions.set(`wc:${topic}`, session);
+        activeSessions.set(topic, session);
+      }
+
+      emitLog('info', 'Storing session', {
+        topics: Array.from(session.topics),
+        address: formatAddress(session.address)
+      });
+
+      // Approve session with namespaces
+      const approvalParams = {
+        id: Number(proposalId),
+        namespaces: {
+          eip155: {
+            chains: [`eip155:${wallet.chain_id}`],
+            methods: [
+              'eth_sendTransaction',
+              'personal_sign',
+              'eth_signTypedData',
+              'eth_signTypedData_v4',
+              'eth_sign',
+              'eth_accounts',
+              'eth_chainId',
+              'wallet_switchEthereumChain'
+            ],
+            events: ['chainChanged', 'accountsChanged'],
+            accounts: [`eip155:${wallet.chain_id}:${wallet.address.toLowerCase()}`]
+          }
+        }
+      };
+
+      emitLog('info', 'Approving session', approvalParams);
+      await kit.approveSession(approvalParams);
+
+      // Update wallet status to connected
+      await updateWalletStatus(wallet.id, 'connected');
+
+      emitLog('success', 'Session approved', {
+        address: formatAddress(wallet.address),
+        topics: Array.from(session.topics)
+      });
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      emitLog('error', 'Session proposal failed', { error: errorMessage });
+      
+      if (event.id) {
+        await kit.rejectSession({
+          id: Number(event.id),
+          reason: {
+            code: 4001,
+            message: errorMessage
+          }
+        });
+      }
+    }
+  });
+
+  kit.on('session_delete', async (event) => {
+    try {
+      const { topic } = event;
+      emitLog('info', 'Session deleted', { topic });
+
+      // Find the session by topic
+      const session = activeSessions.get(topic) || activeSessions.get(`wc:${topic}`);
+      if (session) {
+        // Update wallet status to created
+        await updateWalletStatus(session.walletId, 'created');
+
+        // Remove all topic entries for this session
+        for (const sessionTopic of session.topics) {
+          activeSessions.delete(sessionTopic);
+          activeSessions.delete(`wc:${sessionTopic}`);
+        }
+
+        emitLog('success', 'Session cleanup completed', {
+          walletId: session.walletId,
+          address: formatAddress(session.address)
+        });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      emitLog('error', 'Session deletion failed', { error: errorMessage });
+    }
+  });
+
+  kit.on('session_request', async (request) => {
+    try {
+      const { topic, params, id } = request;
+      
+      emitLog('info', 'Received session request', { 
+        topic,
+        id,
+        method: params.request.method
+      });
+
+      // Try all possible topic keys
+      const possibleKeys = [
+        `wc:${topic}`,
+        topic,
+        ...Array.from(activeSessions.keys())
+      ];
+
+      let session;
+      for (const key of possibleKeys) {
+        session = activeSessions.get(key);
+        if (session) {
+          // Add this topic to the session's topics
+          session.topics.add(topic);
+          // Store session with new topic
+          activeSessions.set(`wc:${topic}`, session);
+          activeSessions.set(topic, session);
+          break;
+        }
+      }
+
+      if (!session) {
+        emitLog('error', 'Session not found', {
+          topic,
+          availableSessions: Array.from(activeSessions.keys())
+        });
+        throw new Error(`Session not found for topic: ${topic}`);
+      }
+
+      emitLog('info', 'Found session', {
+        topic,
+        address: formatAddress(session.address),
+        chainId: session.chainId,
+        autoSign: session.autoSign
+      });
+
+      // Create wallet instance
+      const wallet = new ethers.Wallet(session.privateKey);
+
+      // Emit request event for UI
+      window.dispatchEvent(
+        new CustomEvent('reown:request', {
+          detail: {
+            id: request.id,
+            method: params.request.method,
+            params: params.request.params,
+            timestamp: Date.now(),
+            pending: !session.autoSign // Only pending if not auto-signing
+          }
+        })
+      );
+
+      // Handle auto-signing or wait for user approval
+      let approved = session.autoSign; // Auto-approve if autoSign is true
+      
+      if (!session.autoSign) {
+        emitLog('pending', 'Waiting for user approval', {
+          method: params.request.method,
+          address: formatAddress(session.address)
+        });
+
+        approved = await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Request timed out'));
+          }, 180000); // 3 minute timeout
+
+          const handleResponse = (event: CustomEvent) => {
+            if (event.detail.id === request.id) {
+              clearTimeout(timeout);
+              window.removeEventListener('reown:signature' as any, handleResponse);
+              resolve(event.detail.approve);
+            }
+          };
+
+          window.addEventListener('reown:signature' as any, handleResponse);
+        });
+      } else {
+        emitLog('info', 'Auto-signing enabled, processing request', {
+          method: params.request.method,
+          address: formatAddress(session.address)
+        });
+      }
+
+      if (!approved) {
+        throw new Error('User rejected request');
+      }
+
+      let result;
+      switch (params.request.method) {
+        case 'personal_sign': {
+          const [message] = params.request.params;
+          emitLog('info', 'Signing message', {
+            message: ethers.isHexString(message) ? ethers.toUtf8String(message) : message
+          });
+          result = await wallet.signMessage(
+            ethers.isHexString(message) ? ethers.toUtf8String(message) : message
+          );
+          break;
+        }
+
+        case 'eth_signTypedData':
+        case 'eth_signTypedData_v4': {
+          const [, data] = params.request.params;
+          const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+          emitLog('info', 'Signing typed data', {
+            domain: parsedData.domain,
+            primaryType: parsedData.primaryType
+          });
+          result = await wallet.signTypedData(
+            parsedData.domain,
+            { [parsedData.primaryType]: parsedData.types[parsedData.primaryType] },
+            parsedData.message
+          );
+          break;
+        }
+
+        default:
+          throw new Error(`Unsupported method: ${params.request.method}`);
+      }
+
+      // Emit success response
+      window.dispatchEvent(
+        new CustomEvent('reown:response', {
+          detail: {
+            id: request.id,
+            success: true
+          }
+        })
+      );
+
+      const response = {
+        topic,
+        response: {
+          id: Number(id),
+          jsonrpc: '2.0',
+          result
+        }
+      };
+
+      emitLog('info', 'Sending response', response);
+      await kit.respondSessionRequest(response);
+
+      emitLog('success', 'Request completed', { 
+        method: params.request.method,
+        address: formatAddress(session.address)
+      });
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      emitLog('error', 'Request failed', { error: errorMessage });
+
+      window.dispatchEvent(
+        new CustomEvent('reown:response', {
+          detail: {
+            id: request.id,
+            success: false,
+            error: errorMessage
+          }
+        })
+      );
+
+      await kit.respondSessionRequest({
+        topic: request.topic,
+        response: {
+          id: Number(request.id),
+          jsonrpc: '2.0',
+          error: {
+            code: 4001,
+            message: errorMessage
+          }
+        }
+      });
+    }
+  });
+}
+
+export async function getWalletKit(): Promise<ReownKit> {
+  if (walletKit) return walletKit;
+
+  emitLog('info', 'Initializing WalletKit');
+
+  const projectId = import.meta.env.VITE_REOWN_PROJECT_ID;
+  if (!projectId) {
+    throw new Error('Reown Project ID not configured');
+  }
+
+  const core = new Core({
+    projectId,
+    relayUrl: 'wss://relay.walletconnect.com',
+    logger: 'error'
+  });
+
+  const kit = await WalletKit.init({
+    core,
+    metadata: {
+      name: 'Token Gating Test Dashboard',
+      description: 'Admin dashboard for wallet management',
+      url: window.location.origin,
+      icons: ['https://avatars.githubusercontent.com/u/37784886']
+    }
+  }) as ReownKit;
+
+  await setupEventHandlers(kit);
+  emitLog('success', 'WalletKit initialized');
+  
+  walletKit = kit;
+  return kit;
+}
+
+export function setCurrentWalletId(walletId: string) {
+  currentWalletId = walletId;
+  emitLog('info', 'Current wallet set', { walletId });
+}
+
+export async function pair(uri: string, walletId: string, autoSign: boolean = true) {
+  try {
+    const maskedUri = uri.replace(/([^:]+:)([^@]+)(@.*)/, '$1****$3');
+    emitLog('info', 'Starting pairing', { 
+      walletId,
+      autoSign,
+      uri: maskedUri
+    });
+
+    const kit = await getWalletKit();
+    setCurrentWalletId(walletId);
+
+    // Update auto-sign setting for existing sessions
+    for (const [key, session] of activeSessions.entries()) {
+      if (session.walletId === walletId) {
+        session.autoSign = autoSign;
+        activeSessions.set(key, session); // Update the session in the map
+        emitLog('info', 'Updated auto-sign setting for session', {
+          topic: key,
+          autoSign
+        });
+      }
+    }
+
+    await kit.pair({ 
+      uri: uri.replace(/^reown:/, 'wc:'),
+      metadata: {
+        name: 'Token Gating Test Dashboard',
+        description: 'Admin dashboard for wallet management',
+        url: window.location.origin,
+        icons: ['https://avatars.githubusercontent.com/u/37784886']
+      }
+    });
+
+    emitLog('success', 'Pairing initiated');
+
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    emitLog('error', 'Pairing failed', { error: errorMessage });
+    throw error;
+  }
+}
