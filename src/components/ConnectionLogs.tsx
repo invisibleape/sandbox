@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import { CheckCircle2, XCircle, Loader2, Copy, Check } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, Copy, Check, Trash2 } from 'lucide-react';
 
 export interface ConnectionLog {
   id: string;
@@ -12,9 +12,10 @@ export interface ConnectionLog {
 interface ConnectionLogsProps {
   logs: ConnectionLog[];
   maxHeight?: string;
+  onClearLogs?: () => void;
 }
 
-export function ConnectionLogs({ logs, maxHeight = "24rem" }: ConnectionLogsProps) {
+export function ConnectionLogs({ logs, maxHeight = "24rem", onClearLogs }: ConnectionLogsProps) {
   const logsRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = React.useState(false);
   const [autoScroll, setAutoScroll] = React.useState(true);
@@ -68,6 +69,16 @@ export function ConnectionLogs({ logs, maxHeight = "24rem" }: ConnectionLogsProp
     }
   };
 
+  const handleClearLogs = () => {
+    if (onClearLogs) {
+      // Ask for confirmation before clearing logs
+      if (logs.length > 0 && window.confirm('Are you sure you want to clear all logs?')) {
+        onClearLogs();
+        setAutoScroll(true); // Reset auto-scroll when clearing logs
+      }
+    }
+  };
+
   return (
     <div className="relative bg-white rounded-lg shadow-sm">
       <div className="absolute top-2 right-2 z-10 flex gap-2">
@@ -105,6 +116,15 @@ export function ConnectionLogs({ logs, maxHeight = "24rem" }: ConnectionLogsProp
             <Copy className="w-4 h-4" />
           )}
         </button>
+        {onClearLogs && (
+          <button
+            onClick={handleClearLogs}
+            className="p-1.5 text-gray-500 hover:text-red-600 bg-white/90 hover:bg-white rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm"
+            title="Clear logs"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
       </div>
       <div 
         ref={logsRef}

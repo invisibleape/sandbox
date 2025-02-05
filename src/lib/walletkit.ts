@@ -6,6 +6,8 @@ import { ethers } from 'ethers';
 import { ReownKit } from '../types/reown';
 import { formatAddress } from './wallet';
 import { storeLog } from './logs';
+import { networks } from './networks';
+import { createProvider } from './providers';
 
 let walletKit: ReownKit | null = null;
 let currentWalletId: string | null = null;
@@ -16,8 +18,18 @@ const activeSessions = new Map<string, {
   address: string;
   chainId: number;
   privateKey: string;
-  topics: Set<string>; // Store all related topics
+  topics: Set<string>;
   autoSign: boolean;
+  network: string;
+}>();
+
+// Track pending proposals with numeric and string IDs
+const pendingProposals = new Map<string, {
+  id: string;
+  pairingTopic: string;
+  proposalId: string;
+  timestamp: number;
+  metadata?: Record<string, unknown>;
 }>();
 
 function emitLog(type: 'info' | 'success' | 'error' | 'pending', message: string, details?: any) {
@@ -62,6 +74,116 @@ async function updateWalletStatus(walletId: string, status: 'created' | 'connect
   }
 }
 
+async function handleTransaction(wallet: ethers.Wallet, provider: ethers.Provider, tx: any) {
+  try {
+    // Prepare transaction parameters
+    const txParams: any = {
+      to: tx.to,
+      data: tx.data,
+      value: tx.value ? ethers.getBigInt(tx.value) : undefined
+    };
+
+    // Handle gas parameters
+    if (tx.gas) {
+      txParams.gasLimit = ethers.getBigInt(tx.gas);
+    } else {
+      try {
+        const gasEstimate = await provider.estimateGas({
+          from: wallet.address,
+          ...txParams
+        });
+        txParams.gasLimit = gasEstimate * BigInt(12) / BigInt(10); // Add 20% buffer
+        emitLog('info', 'Gas estimated', { gasLimit: txParams.gasLimit.toString() });
+      } catch (error) {
+        emitLog('error', 'Gas estimation failed, using safe default', { error: error instanceof Error ? error.message : 'Unknown error' });
+        txParams.gasLimit = ethers.getBigInt('1000000'); // Higher default gas limit
+      }
+    }
+
+    // Handle gas price parameters
+    if (tx.maxFeePerGas && tx.maxPriorityFeePerGas) {
+      txParams.maxFeePerGas = ethers.getBigInt(tx.maxFeePerGas);
+      txParams.maxPriorityFeePerGas = ethers.getBigInt(tx.maxPriorityFeePerGas);
+    } else {
+      try {
+        const feeData = await provider.getFeeData();
+        if (feeData.maxFeePerGas && feeData.maxPriorityFeePerGas) {
+          // Add 20% buffer to fees
+          txParams.maxFeePerGas = feeData.maxFeePerGas * BigInt(12) / BigInt(10);
+          txParams.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas * BigInt(12) / BigInt(10);
+          emitLog('info', 'Using network fee data with buffer', {
+            maxFeePerGas: txParams.maxFeePerGas.toString(),
+            maxPriorityFeePerGas: txParams.maxPriorityFeePerGas.toString()
+          });
+        } else {
+          // Fallback to legacy gas price
+          const gasPrice = await provider.getGasPrice();
+          txParams.gasPrice = gasPrice * BigInt(12) / BigInt(10); // Add 20% buffer
+          emitLog('info', 'Using legacy gas price with buffer', { gasPrice: txParams.gasPrice.toString() });
+        }
+      } catch (error) {
+        emitLog('error', 'Fee data fetch failed, using safe default', { error: error instanceof Error ? error.message : 'Unknown error' });
+        // Use high default values for SKALE
+        txParams.gasPrice = ethers.parseUnits('1', 'gwei');
+      }
+    }
+
+    // Handle nonce
+    if (tx.nonce !== undefined) {
+      txParams.nonce = Number(tx.nonce);
+    } else {
+      txParams.nonce = await provider.getTransactionCount(wallet.address);
+    }
+
+    // Send transaction with retry logic
+    const MAX_RETRIES = 3;
+    let lastError;
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        const response = await wallet.sendTransaction(txParams);
+        
+        emitLog('pending', 'Transaction sent, waiting for confirmation', {
+          hash: response.hash,
+          attempt: attempt + 1
+        });
+
+        const receipt = await response.wait();
+        
+        emitLog('success', 'Transaction confirmed', {
+          hash: receipt.hash,
+          blockNumber: receipt.blockNumber,
+          gasUsed: receipt.gasUsed.toString()
+        });
+
+        return response.hash;
+      } catch (error) {
+        lastError = error;
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        
+        if (attempt < MAX_RETRIES - 1) {
+          emitLog('error', `Transaction attempt ${attempt + 1} failed, retrying...`, { error: errorMessage });
+          // Increase gas and fees for next attempt
+          txParams.gasLimit = txParams.gasLimit * BigInt(12) / BigInt(10);
+          if (txParams.maxFeePerGas) {
+            txParams.maxFeePerGas = txParams.maxFeePerGas * BigInt(12) / BigInt(10);
+            txParams.maxPriorityFeePerGas = txParams.maxPriorityFeePerGas * BigInt(12) / BigInt(10);
+          } else if (txParams.gasPrice) {
+            txParams.gasPrice = txParams.gasPrice * BigInt(12) / BigInt(10);
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt))); // Exponential backoff
+        }
+      }
+    }
+
+    throw lastError || new Error('Transaction failed after all retries');
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    emitLog('error', 'Transaction failed', { error: errorMessage });
+    throw error;
+  }
+}
+
 async function setupEventHandlers(kit: ReownKit) {
   kit.on('session_proposal', async (event) => {
     try {
@@ -82,6 +204,20 @@ async function setupEventHandlers(kit: ReownKit) {
       if (!currentWalletId) {
         throw new Error('No wallet selected');
       }
+
+      // Store proposal data with multiple ID formats
+      const proposalData = {
+        id: proposalId,
+        pairingTopic,
+        proposalId,
+        timestamp: Date.now(),
+        metadata: event.params?.proposer?.metadata
+      };
+      
+      // Store with both string and numeric IDs
+      pendingProposals.set(proposalId, proposalData);
+      pendingProposals.set(event.id.toString(), proposalData);
+      pendingProposals.set(String(event.id), proposalData);
 
       // Get wallet details
       const { data: wallet, error: fetchError } = await supabase
@@ -110,7 +246,8 @@ async function setupEventHandlers(kit: ReownKit) {
         chainId: wallet.chain_id,
         privateKey,
         topics: new Set([pairingTopic, proposalId]),
-        autoSign: true // Default to auto-sign enabled
+        autoSign: true, // Default to auto-sign enabled
+        network: wallet.network
       };
 
       // Store session with all possible topic keys
@@ -124,24 +261,32 @@ async function setupEventHandlers(kit: ReownKit) {
         address: formatAddress(session.address)
       });
 
+      // Define supported methods for all networks
+      const supportedMethods = [
+        'eth_sendTransaction',
+        'personal_sign',
+        'eth_signTypedData',
+        'eth_signTypedData_v4',
+        'eth_sign',
+        'eth_accounts',
+        'eth_chainId',
+        'wallet_switchEthereumChain'
+      ];
+
+      // Get all supported chain IDs
+      const supportedChains = networks.map(n => `eip155:${n.chainId}`);
+
       // Approve session with namespaces
       const approvalParams = {
         id: Number(proposalId),
         namespaces: {
           eip155: {
-            chains: [`eip155:${wallet.chain_id}`],
-            methods: [
-              'eth_sendTransaction',
-              'personal_sign',
-              'eth_signTypedData',
-              'eth_signTypedData_v4',
-              'eth_sign',
-              'eth_accounts',
-              'eth_chainId',
-              'wallet_switchEthereumChain'
-            ],
+            chains: supportedChains, // Support all chains
+            methods: supportedMethods,
             events: ['chainChanged', 'accountsChanged'],
-            accounts: [`eip155:${wallet.chain_id}:${wallet.address.toLowerCase()}`]
+            accounts: supportedChains.map(chain => 
+              `${chain}:${wallet.address.toLowerCase()}`
+            )
           }
         }
       };
@@ -152,8 +297,13 @@ async function setupEventHandlers(kit: ReownKit) {
       // Update wallet status to connected
       await updateWalletStatus(wallet.id, 'connected');
 
+      // Clean up all proposal entries
+      pendingProposals.delete(proposalId);
+      pendingProposals.delete(event.id.toString());
+      pendingProposals.delete(String(event.id));
+
       emitLog('success', 'Session approved', {
-        address: formatAddress(wallet.address),
+        address: formatAddress(session.address),
         topics: Array.from(session.topics)
       });
 
@@ -162,6 +312,10 @@ async function setupEventHandlers(kit: ReownKit) {
       emitLog('error', 'Session proposal failed', { error: errorMessage });
       
       if (event.id) {
+        // Clean up proposal entries on error
+        pendingProposals.delete(event.id.toString());
+        pendingProposals.delete(String(event.id));
+        
         await kit.rejectSession({
           id: Number(event.id),
           reason: {
@@ -172,6 +326,19 @@ async function setupEventHandlers(kit: ReownKit) {
       }
     }
   });
+
+  // Clean up expired proposals every minute
+  setInterval(() => {
+    const now = Date.now();
+    const PROPOSAL_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+
+    for (const [id, proposal] of pendingProposals.entries()) {
+      if (now - proposal.timestamp > PROPOSAL_TIMEOUT) {
+        pendingProposals.delete(id);
+        emitLog('info', 'Cleaned up expired proposal', { id });
+      }
+    }
+  }, 60000);
 
   kit.on('session_delete', async (event) => {
     try {
@@ -208,7 +375,8 @@ async function setupEventHandlers(kit: ReownKit) {
       emitLog('info', 'Received session request', { 
         topic,
         id,
-        method: params.request.method
+        method: params.request.method,
+        params: params.request.params
       });
 
       // Try all possible topic keys
@@ -243,11 +411,21 @@ async function setupEventHandlers(kit: ReownKit) {
         topic,
         address: formatAddress(session.address),
         chainId: session.chainId,
-        autoSign: session.autoSign
+        autoSign: session.autoSign,
+        network: session.network
       });
 
+      // Get the network configuration
+      const network = networks.find(n => n.id === session.network);
+      if (!network) {
+        throw new Error(`Network configuration not found for ${session.network}`);
+      }
+
+      // Create provider for the current network
+      const provider = await createProvider(network);
+
       // Create wallet instance
-      const wallet = new ethers.Wallet(session.privateKey);
+      const wallet = new ethers.Wallet(session.privateKey, provider);
 
       // Emit request event for UI
       window.dispatchEvent(
@@ -326,6 +504,49 @@ async function setupEventHandlers(kit: ReownKit) {
           break;
         }
 
+        case 'eth_sendTransaction': {
+          const [tx] = params.request.params;
+          emitLog('info', 'Processing transaction request', {
+            to: tx.to,
+            value: tx.value,
+            data: tx.data?.slice(0, 64) + '...' // Log only first 32 bytes of data
+          });
+
+          result = await handleTransaction(wallet, provider, tx);
+          break;
+        }
+
+        case 'wallet_switchEthereumChain': {
+          const [{ chainId }] = params.request.params;
+          const requestedChainId = parseInt(chainId, 16);
+          emitLog('info', 'Switching chain', { chainId, requestedChainId });
+
+          // Find the requested network in our supported networks
+          const requestedNetwork = networks.find(n => n.chainId === requestedChainId);
+          if (!requestedNetwork) {
+            throw new Error(`Chain ID ${requestedChainId} is not supported`);
+          }
+
+          // Always allow chain switching - we support all networks
+          result = null;
+          emitLog('success', 'Chain switch allowed', {
+            requestedChain: requestedChainId,
+            chainName: requestedNetwork.name
+          });
+          break;
+        }
+
+        case 'eth_accounts': {
+          result = [session.address.toLowerCase()];
+          break;
+        }
+
+        case 'eth_chainId': {
+          // Format chain ID as hex string with 0x prefix
+          result = `0x${session.chainId.toString(16)}`;
+          break;
+        }
+
         default:
           throw new Error(`Unsupported method: ${params.request.method}`);
       }
@@ -382,6 +603,27 @@ async function setupEventHandlers(kit: ReownKit) {
           }
         }
       });
+    }
+  });
+
+  // Add proposal cleanup on pairing
+  kit.on('pairing', async (event) => {
+    try {
+      emitLog('info', 'Pairing event received', { topic: event.topic });
+      
+      // Clean up any expired proposals
+      const now = Date.now();
+      const PROPOSAL_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+
+      for (const [id, proposal] of pendingProposals.entries()) {
+        if (now - proposal.timestamp > PROPOSAL_TIMEOUT) {
+          pendingProposals.delete(id);
+          emitLog('info', 'Cleaned up expired proposal', { id });
+        }
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      emitLog('error', 'Pairing event handler failed', { error: errorMessage });
     }
   });
 }

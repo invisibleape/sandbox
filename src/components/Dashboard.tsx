@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { BarChart3, Wallet as WalletIcon, Activity, CheckCircle, Loader2, Copy, AlertCircle, ExternalLink, Tag, Search, ChevronLeft, ChevronRight, RefreshCw, Clock, Mail } from 'lucide-react';
 import { WalletStats, Network } from '../types';
 import { generateWallets, getWalletCount, getWallets, formatAddress } from '../lib/wallet';
@@ -122,6 +122,10 @@ function Dashboard() {
     }
   }, [isConnected, debouncedSearch, debouncedFilterNetwork, debouncedFilterStatus, currentPage]);
 
+  const handleRefresh = useCallback(() => {
+    refreshData();
+  }, [refreshData]);
+
   useEffect(() => {
     checkConnection();
   }, []);
@@ -236,10 +240,6 @@ function Dashboard() {
   const getExplorerUrl = (network: string, address: string) => {
     const networkConfig = networks.find(n => n.id === network);
     return networkConfig ? `${networkConfig.explorerUrl}/address/${address}` : null;
-  };
-
-  const handleRefresh = () => {
-    refreshData();
   };
 
   const formatTimeAgo = (date: Date) => {

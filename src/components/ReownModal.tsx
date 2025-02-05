@@ -189,6 +189,10 @@ export function ReownModal({ isOpen, onClose, onConnect, isConnecting, walletId 
     );
   };
 
+  const handleClearLogs = () => {
+    setLogs([]);
+  };
+
   // Determine if the modal can be closed
   const canClose = !isConnecting && !hasPendingRequests;
 
@@ -327,7 +331,11 @@ export function ReownModal({ isOpen, onClose, onConnect, isConnecting, walletId 
 
           <div className="flex-1 min-h-0">
             <h3 className="text-sm font-medium text-gray-700 mb-2">Connection Log</h3>
-            <ConnectionLogs logs={logs} maxHeight="calc(100vh - 24rem)" />
+            <ConnectionLogs 
+              logs={logs} 
+              maxHeight="calc(100vh - 24rem)" 
+              onClearLogs={handleClearLogs}
+            />
           </div>
         </div>
       </div>

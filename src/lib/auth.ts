@@ -20,7 +20,8 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
   try {
     emitLog({
       type: 'info',
-      message: `Starting wallet connection process for ${network.name} network...`
+      message: `Starting wallet connection process for ${network.name} network...`,
+      walletId
     });
 
     // Validate URI format
@@ -36,7 +37,8 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
 
     emitLog({
       type: 'pending',
-      message: 'Fetching wallet details...'
+      message: 'Fetching wallet details...',
+      walletId
     });
 
     // Get the wallet from the database
@@ -47,32 +49,48 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
       .single();
 
     if (fetchError || !wallet) {
+      const error = fetchError?.message || 'Failed to fetch wallet details';
       emitLog({
         type: 'error',
-        message: 'Failed to fetch wallet details'
+        message: error,
+        walletId
       });
-      throw new Error(`Failed to fetch wallet details: ${fetchError?.message}`);
+      throw new Error(error);
     }
 
     emitLog({
       type: 'success',
-      message: `Wallet details retrieved successfully for ID: ${walletId}`
+      message: `Wallet details retrieved successfully for ID: ${walletId}`,
+      walletId
     });
 
     // Log wallet details (excluding sensitive data)
     emitLog({
       type: 'info',
-      message: `Wallet info - Address: ${wallet.address}, Network: ${wallet.network}, Chain ID: ${wallet.chain_id}`
+      message: `Wallet info - Address: ${wallet.address}, Network: ${wallet.network}, Chain ID: ${wallet.chain_id}`,
+      walletId
     });
 
     // Validate wallet network matches
     if (wallet.network !== network.id) {
-      throw new Error(`Network mismatch: wallet is on ${wallet.network}, trying to connect to ${network.id}`);
+      const error = `Network mismatch: wallet is on ${wallet.network}, trying to connect to ${network.id}`;
+      emitLog({
+        type: 'error',
+        message: error,
+        walletId
+      });
+      throw new Error(error);
     }
 
     // Validate wallet status
     if (wallet.status === 'connected') {
-      throw new Error('Wallet is already connected');
+      const error = 'Wallet is already connected';
+      emitLog({
+        type: 'error',
+        message: error,
+        walletId
+      });
+      throw new Error(error);
     }
 
     // Set current wallet ID before initializing WalletKit
@@ -80,7 +98,8 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
 
     emitLog({
       type: 'pending',
-      message: 'Initializing Reown connection...'
+      message: 'Initializing Reown connection...',
+      walletId
     });
 
     // Connect using Reown
@@ -88,17 +107,20 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
 
     emitLog({
       type: 'success',
-      message: 'Reown session established successfully'
+      message: 'Reown session established successfully',
+      walletId
     });
 
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
     console.error('Reown connection failed:', error);
     
     emitLog({
       type: 'error',
-      message: error instanceof Error ? error.message : 'Unknown error occurred'
+      message: errorMessage,
+      walletId
     });
     
-    throw error instanceof Error ? error : new Error('Failed to establish Reown session');
+    throw new Error(errorMessage);
   }
 }

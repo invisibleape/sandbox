@@ -120,14 +120,14 @@ export const networks: Network[] = [
   },
   {
     id: 'skale',
-    name: 'SKALE',
-    chainId: 1273227453,
-    rpcUrl: 'https://mainnet.skalenodes.com/v1/honorable-steel-rasalhague',
+    name: 'SKALE Calypso',
+    chainId: 1564830818, // 0x5d456c62
+    rpcUrl: 'https://mainnet.skalenodes.com/v1/calypso',
     logoUrl: 'https://assets.coingecko.com/coins/images/13245/small/SKALE_token_300x300.png',
-    explorerUrl: 'https://honorable-steel-rasalhague.explorer.mainnet.skalenodes.com',
+    explorerUrl: 'https://calypso.explorer.skale.network',
     nativeCurrency: {
-      name: 'SKALE',
-      symbol: 'SKL',
+      name: 'sFUEL',
+      symbol: 'sFUEL',
       decimals: 18
     }
   }

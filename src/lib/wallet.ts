@@ -1,141 +1,23 @@
 import { ethers } from 'ethers';
 import { supabase } from './supabase';
+import { withRetry } from './supabase';
 import { encryptPrivateKey } from './crypto';
-import { createInfuraProvider } from './infura';
+import { createProvider } from './providers';
 import { Network } from '../types';
-import { Database } from '../types/supabase';
 
-// Retry configuration for database operations
-const DB_RETRY_COUNT = 3;
-const DB_RETRY_DELAY = 1000;
-
-async function retryDatabaseOperation<T>(operation: () => Promise<T>): Promise<T> {
-  let lastError: Error | null = null;
-  
-  for (let attempt = 0; attempt < DB_RETRY_COUNT; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error('Unknown error');
-      console.warn(`Database operation failed (attempt ${attempt + 1}/${DB_RETRY_COUNT}):`, lastError);
-      
-      if (attempt < DB_RETRY_COUNT - 1) {
-        await new Promise(resolve => setTimeout(resolve, DB_RETRY_DELAY * Math.pow(2, attempt)));
-      }
-    }
-  }
-  
-  throw lastError || new Error('Database operation failed after maximum retries');
+// Format address helper
+export function formatAddress(address: string): string {
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
-interface WalletGenerationLog {
-  timestamp: string;
-  status: 'success' | 'error';
-  message: string;
-  details?: any;
-}
-
-export interface WalletColumn {
-  id: keyof Database['public']['Tables']['wallets']['Row'];
-  label: string;
-  visible: boolean;
-  render?: (value: any, wallet: Database['public']['Tables']['wallets']['Row']) => React.ReactNode;
-}
-
-export const defaultColumns: WalletColumn[] = [
-  {
-    id: 'address',
-    label: 'Wallet Address',
-    visible: true
-  },
-  {
-    id: 'network',
-    label: 'Network',
-    visible: true
-  },
-  {
-    id: 'status',
-    label: 'Status',
-    visible: true
-  },
-  {
-    id: 'created_at',
-    label: 'Created',
-    visible: true
-  },
-  {
-    id: 'first_transaction_at',
-    label: 'First Transaction',
-    visible: false
-  },
-  {
-    id: 'last_transaction_at',
-    label: 'Last Transaction',
-    visible: false
-  },
-  {
-    id: 'transaction_count',
-    label: 'Transactions',
-    visible: false
-  },
-  {
-    id: 'tag',
-    label: 'Tag',
-    visible: true
-  }
-];
-
-let generationLogs: WalletGenerationLog[] = [];
-
-function logWalletGeneration(status: 'success' | 'error', message: string, details?: any) {
-  const log = {
-    timestamp: new Date().toISOString(),
-    status,
-    message,
-    details
-  };
-  generationLogs = [log, ...generationLogs.slice(0, 99)];
-  console.log(`[Wallet Generation ${status}]: ${message}`, details);
-  return log;
-}
-
-export function getGenerationLogs() {
-  return generationLogs;
-}
-
-async function retryOperation<T>(
-  operation: () => Promise<T>,
-  maxRetries: number = 3,
-  initialDelay: number = 1000
-): Promise<T> {
-  let lastError: Error;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error('Unknown error');
-      
-      if (attempt === maxRetries) {
-        throw lastError;
-      }
-      
-      const delay = initialDelay * Math.pow(2, attempt - 1);
-      console.log(`Retrying operation (attempt ${attempt + 1}/${maxRetries}) after ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-  
-  throw lastError!;
-}
-
+// Generate a single wallet
 async function generateSingleWallet(network: Network) {
   try {
-    logWalletGeneration('success', 'Starting wallet generation');
+    console.log('Starting wallet generation');
     
-    // Get Infura provider with retry
-    const provider = await retryOperation(
-      () => createInfuraProvider(network),
+    // Get provider with retry - this will use either Infura or BlastAPI depending on the network
+    const provider = await withRetry(
+      () => createProvider(network),
       3,
       1000
     );
@@ -151,12 +33,12 @@ async function generateSingleWallet(network: Network) {
       throw new Error('Failed to generate private key');
     }
 
-    logWalletGeneration('success', 'Wallet keys generated successfully');
+    console.log('Wallet keys generated successfully');
 
     const encryptedPrivateKey = await encryptPrivateKey(wallet.privateKey);
     const encryptedMnemonic = await encryptPrivateKey(wallet.mnemonic.phrase);
     
-    logWalletGeneration('success', 'Wallet generated and encrypted successfully', { 
+    console.log('Wallet generated and encrypted successfully', { 
       address: wallet.address,
       hasPrivateKey: !!encryptedPrivateKey,
       hasMnemonic: !!encryptedMnemonic,
@@ -176,17 +58,17 @@ async function generateSingleWallet(network: Network) {
     };
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
-    const errorLog = logWalletGeneration('error', 'Failed to generate wallet', {
+    console.error('Error generating individual wallet:', {
       error: errorMessage,
       stack: err instanceof Error ? err.stack : undefined,
       network: network.id,
       chainId: network.chainId
     });
-    console.error('Error generating individual wallet:', errorLog);
     return null;
   }
 }
 
+// Generate multiple wallets
 export async function generateWallets(count: number = 100, network: Network) {
   try {
     const batchSize = 10;
@@ -195,7 +77,7 @@ export async function generateWallets(count: number = 100, network: Network) {
     let successCount = 0;
     let errorCount = 0;
 
-    logWalletGeneration('success', `Starting batch generation of ${count} wallets for ${network.name} (Chain ID: ${network.chainId})`);
+    console.log(`Starting batch generation of ${count} wallets for ${network.name} (Chain ID: ${network.chainId})`);
 
     for (let i = 0; i < batches; i++) {
       const currentBatchSize = Math.min(batchSize, count - i * batchSize);
@@ -208,7 +90,7 @@ export async function generateWallets(count: number = 100, network: Network) {
       
       if (validWallets.length > 0) {
         // Retry database insertion if it fails
-        await retryOperation(async () => {
+        await withRetry(async () => {
           const { error: insertError } = await supabase
             .from('wallets')
             .insert(validWallets);
@@ -217,7 +99,7 @@ export async function generateWallets(count: number = 100, network: Network) {
         });
 
         allWallets.push(...validWallets);
-        logWalletGeneration('success', `Batch ${i + 1}/${batches} completed`, {
+        console.log(`Batch ${i + 1}/${batches} completed`, {
           batchSize: validWallets.length,
           totalSuccess: successCount,
           totalError: errorCount,
@@ -231,7 +113,7 @@ export async function generateWallets(count: number = 100, network: Network) {
       throw new Error('Failed to generate any valid wallets');
     }
 
-    logWalletGeneration('success', 'Wallet generation completed', {
+    console.log('Wallet generation completed', {
       totalGenerated: allWallets.length,
       successCount,
       errorCount,
@@ -242,13 +124,12 @@ export async function generateWallets(count: number = 100, network: Network) {
     return { data: allWallets, error: null };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    const errorLog = logWalletGeneration('error', 'Wallet generation failed', {
+    console.error('Error in generateWallets:', {
       error: errorMessage,
       stack: error instanceof Error ? error.stack : undefined,
       network: network.id,
       chainId: network.chainId
     });
-    console.error('Error in generateWallets:', errorLog);
     return { 
       data: null, 
       error: error instanceof Error ? error : new Error('Unknown error occurred') 
@@ -256,8 +137,9 @@ export async function generateWallets(count: number = 100, network: Network) {
   }
 }
 
+// Get wallet count
 export async function getWalletCount(): Promise<number> {
-  return retryDatabaseOperation(async () => {
+  return withRetry(async () => {
     console.log('Fetching wallet count...');
     
     const { count, error } = await supabase
@@ -279,35 +161,7 @@ export async function getWalletCount(): Promise<number> {
   });
 }
 
-export async function getWalletsByStatus(status: string) {
-  return retryDatabaseOperation(async () => {
-    console.log('Fetching wallets by status:', { status });
-    
-    const { data, error } = await supabase
-      .from('wallets')
-      .select('*')
-      .eq('status', status)
-      .order('created_at', { ascending: false })
-      .limit(100);
-
-    if (error) {
-      console.error('Error getting wallets by status:', {
-        error,
-        code: error.code,
-        message: error.message,
-        details: error.details
-      });
-      throw error;
-    }
-
-    console.log('Successfully fetched wallets by status:', {
-      status,
-      count: data?.length
-    });
-    return data;
-  });
-}
-
+// Get wallets with filtering and pagination
 export async function getWallets(filter: {
   status?: string;
   network?: string;
@@ -315,7 +169,7 @@ export async function getWallets(filter: {
   page: number;
   limit: number;
 }) {
-  return retryDatabaseOperation(async () => {
+  return withRetry(async () => {
     console.log('Fetching wallets with filter:', filter);
     
     try {
@@ -378,8 +232,4 @@ export async function getWallets(filter: {
       throw error;
     }
   });
-}
-
-export function formatAddress(address: string): string {
-  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }

@@ -31,20 +31,83 @@ export async function getBlastApiKey(): Promise<string | null> {
 }
 
 export async function createProvider(network: Network): Promise<ethers.JsonRpcProvider> {
-  // First try Infura for supported networks
-  if (['ethereum', 'polygon', 'arbitrum', 'linea', 'base'].includes(network.id)) {
+  // For SKALE, always use the direct RPC URL with custom network configuration
+  if (network.id === 'skale') {
     try {
-      const provider = await createInfuraProvider(network);
+      const provider = new ethers.JsonRpcProvider(network.rpcUrl, {
+        chainId: network.chainId,
+        name: network.name,
+        ensAddress: null,
+        // Add SKALE-specific network configuration
+        skipFetchSetup: true, // Skip initial network detection
+        staticNetwork: true, // Use static network configuration
+        // Add custom headers for SKALE
+        headers: {
+          'Accept': '*/*',
+          'Origin': window.location.origin
+        }
+      });
+      
+      // Override getNetwork to always return the correct chain ID
+      const originalGetNetwork = provider.getNetwork.bind(provider);
+      provider.getNetwork = async () => {
+        try {
+          const network = await originalGetNetwork();
+          return {
+            ...network,
+            chainId: BigInt(network.chainId),
+            name: 'skale'
+          };
+        } catch (error) {
+          // Return static network info if RPC call fails
+          return {
+            chainId: BigInt(network.chainId),
+            name: 'skale'
+          };
+        }
+      };
+
+      // Test connection but don't fail if it doesn't work
+      // SKALE nodes might return errors for some RPC calls
+      try {
+        await provider.getNetwork();
+      } catch (error) {
+        console.warn('SKALE network test failed, but continuing:', error);
+      }
+
       return provider;
     } catch (error) {
+      console.error('Failed to create SKALE provider:', error);
+      throw new Error(`Failed to connect to SKALE network. Please try again later.`);
+    }
+  }
+
+  // Try Infura first for supported networks
+  if (['ethereum', 'polygon', 'arbitrum', 'linea', 'base'].includes(network.id)) {
+    try {
+      const infuraKey = await getInfuraKey();
+      if (infuraKey) {
+        const networkMap: { [key: string]: string } = {
+          'ethereum': 'mainnet',
+          'polygon': 'matic',
+          'arbitrum': 'arbitrum',
+          'linea': 'linea',
+          'base': 'base'
+        };
+
+        const provider = new ethers.InfuraProvider(networkMap[network.id], infuraKey);
+        await provider.getNetwork(); // Test connection
+        return provider;
+      }
+    } catch (infuraError) {
       console.log(`Infura not available for ${network.name}, falling back to BlastAPI`);
     }
   }
 
-  // Use BlastAPI for other networks
+  // Try BlastAPI for remaining networks
   const blastApiKey = await getBlastApiKey();
   if (!blastApiKey) {
-    throw new Error('No active BlastAPI key found in the database. Please add a BlastAPI key first.');
+    throw new Error('No API providers available. Please add either a BlastAPI or Infura key to the database.');
   }
 
   // Map network to BlastAPI endpoint
@@ -57,49 +120,28 @@ export async function createProvider(network: Network): Promise<ethers.JsonRpcPr
     'base': 'base',
     'linea': 'linea',
     'blast': 'blast',
-    'celo': 'celo',
-    'skale': 'skale'
+    'celo': 'celo'
   };
 
   const blastNetwork = networkMap[network.id];
   if (!blastNetwork) {
-    throw new Error(`Network ${network.id} is not supported`);
+    throw new Error(`Network ${network.id} is not supported by any available provider`);
   }
 
   const blastUrl = `https://${blastNetwork}.blastapi.io/${blastApiKey}`;
   
   try {
-    const provider = new ethers.JsonRpcProvider(blastUrl);
-    // Test the provider connection
-    await provider.getNetwork();
+    const provider = new ethers.JsonRpcProvider(blastUrl, {
+      chainId: network.chainId,
+      name: network.name,
+      ensAddress: null
+    });
+    await provider.getNetwork(); // Test connection
     return provider;
   } catch (error) {
-    throw new Error(`Failed to connect to BlastAPI for network ${network.name}. Please check your API key and try again.`);
+    console.error('Failed to connect to BlastAPI:', error);
+    throw new Error(`Failed to connect to provider for ${network.name}. Please try again later.`);
   }
-}
-
-async function createInfuraProvider(network: Network): Promise<ethers.InfuraProvider> {
-  const apiKey = await getInfuraKey();
-  if (!apiKey) {
-    throw new Error('No active Infura API key found');
-  }
-
-  const networkMap: { [key: string]: string } = {
-    'ethereum': 'mainnet',
-    'polygon': 'matic',
-    'arbitrum': 'arbitrum',
-    'linea': 'linea',
-    'base': 'base'
-  };
-
-  const infuraNetwork = networkMap[network.id];
-  if (!infuraNetwork) {
-    throw new Error(`Network ${network.id} is not supported by Infura`);
-  }
-  
-  const provider = new ethers.InfuraProvider(infuraNetwork, apiKey);
-  await provider.getNetwork(); // Test connection
-  return provider;
 }
 
 async function getInfuraKey(): Promise<string | null> {
