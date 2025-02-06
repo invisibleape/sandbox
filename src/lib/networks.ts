@@ -121,14 +121,15 @@ export const networks: Network[] = [
   {
     id: 'skale',
     name: 'SKALE Calypso',
-    chainId: 1564830818, // 0x5d456c62
-    rpcUrl: 'https://mainnet.skalenodes.com/v1/calypso',
+    chainId: 1564830818,
+    rpcUrl: 'https://mainnet.skalenodes.com/v1/honorable-steel-rasalhague',
     logoUrl: 'https://assets.coingecko.com/coins/images/13245/small/SKALE_token_300x300.png',
     explorerUrl: 'https://calypso.explorer.skale.network',
     nativeCurrency: {
       name: 'sFUEL',
       symbol: 'sFUEL',
       decimals: 18
-    }
+    },
+    useEthereumWallet: false // Explicitly set to false for SKALE
   }
 ];

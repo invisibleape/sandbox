@@ -4,6 +4,7 @@ import { withRetry } from './supabase';
 import { encryptPrivateKey } from './crypto';
 import { createProvider } from './providers';
 import { Network } from '../types';
+import { networks } from './networks';
 
 // Format address helper
 export function formatAddress(address: string): string {
@@ -15,15 +16,8 @@ async function generateSingleWallet(network: Network) {
   try {
     console.log('Starting wallet generation');
     
-    // Get provider with retry - this will use either Infura or BlastAPI depending on the network
-    const provider = await withRetry(
-      () => createProvider(network),
-      3,
-      1000
-    );
-    
-    // Create a new random wallet and connect it to the provider
-    const wallet = ethers.Wallet.createRandom().connect(provider);
+    // Create a random wallet without a provider first
+    const wallet = ethers.Wallet.createRandom();
     
     if (!wallet.mnemonic?.phrase) {
       throw new Error('Failed to generate mnemonic phrase');

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, AlertCircle, ToggleLeft, ToggleRight, Loader2, CheckCircle2, XCircle, FileText, Key } from 'lucide-react';
+import { X, AlertCircle, ToggleLeft, ToggleRight, Loader2, CheckCircle2, XCircle, FileText, Key, Coins } from 'lucide-react';
 import { ConnectionLogs, ConnectionLog } from './ConnectionLogs';
 import { getWalletLogs } from '../lib/logs';
 
@@ -14,7 +14,7 @@ interface SignatureRequest {
 interface ReownModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConnect: (uri: string, autoSign?: boolean) => Promise<void>;
+  onConnect: (uri: string, autoSign?: boolean, autoMint?: boolean) => Promise<void>;
   isConnecting: boolean;
   walletId: string | null;
 }
@@ -47,9 +47,11 @@ export function ReownModal({ isOpen, onClose, onConnect, isConnecting, walletId 
   const [error, setError] = useState<string | null>(null);
   const [logs, setLogs] = useState<ConnectionLog[]>([]);
   const [autoSign, setAutoSign] = useState(true);
+  const [autoMint, setAutoMint] = useState(true);
   const [signatureRequests, setSignatureRequests] = useState<SignatureRequest[]>([]);
   const [hasPendingRequests, setHasPendingRequests] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
+  const [keepOpen, setKeepOpen] = useState(false);
 
   // Auto-connect when valid URI is pasted
   useEffect(() => {
@@ -68,6 +70,7 @@ export function ReownModal({ isOpen, onClose, onConnect, isConnecting, walletId 
       setHasPendingRequests(false);
       setSignatureRequests([]);
       setLogs([]);
+      setKeepOpen(false);
     }
   }, [isOpen]);
 
@@ -153,8 +156,9 @@ export function ReownModal({ isOpen, onClose, onConnect, isConnecting, walletId 
     }
 
     try {
-      await onConnect(trimmedUri, autoSign);
+      await onConnect(trimmedUri, autoSign, autoMint);
       setUri('');
+      setKeepOpen(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to connect wallet');
     }
@@ -193,28 +197,48 @@ export function ReownModal({ isOpen, onClose, onConnect, isConnecting, walletId 
     setLogs([]);
   };
 
+  const handleClose = () => {
+    if (hasPendingRequests) {
+      if (window.confirm('There are pending requests. Are you sure you want to close?')) {
+        onClose();
+      }
+    } else {
+      onClose();
+    }
+  };
+
   // Determine if the modal can be closed
-  const canClose = !isConnecting && !hasPendingRequests;
+  const canClose = !isConnecting;
 
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg p-6 w-full max-w-2xl relative max-h-[90vh] overflow-hidden flex flex-col">
-        <button
-          onClick={() => canClose && onClose()}
-          className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          disabled={!canClose}
-          title={
-            isConnecting
-              ? "Can't close while connecting"
-              : hasPendingRequests
-                ? "Can't close while requests are pending"
-                : "Close"
-          }
-        >
-          <X className="w-5 h-5" />
-        </button>
+        <div className="absolute top-4 right-4 flex items-center gap-2">
+          {keepOpen && (
+            <button
+              onClick={() => setKeepOpen(false)}
+              className="text-gray-400 hover:text-gray-600 px-2 py-1 text-sm"
+            >
+              Stop Monitoring
+            </button>
+          )}
+          <button
+            onClick={handleClose}
+            className="text-gray-400 hover:text-gray-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!canClose}
+            title={
+              isConnecting
+                ? "Can't close while connecting"
+                : hasPendingRequests
+                  ? "Warning: Pending requests"
+                  : "Close"
+            }
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
 
         <h2 className="text-xl font-semibold mb-4">Connect Wallet</h2>
         
@@ -240,7 +264,7 @@ export function ReownModal({ isOpen, onClose, onConnect, isConnecting, walletId 
             </p>
           </div>
 
-          <div className="mb-4 flex items-center justify-between">
+          <div className="mb-4 space-y-4">
             <label className="flex items-center gap-2 cursor-pointer">
               <button
                 type="button"
@@ -256,6 +280,25 @@ export function ReownModal({ isOpen, onClose, onConnect, isConnecting, walletId 
               </button>
               <span className="text-sm font-medium text-gray-700">
                 Auto-sign requests
+              </span>
+            </label>
+
+            <label className="flex items-center gap-2 cursor-pointer">
+              <button
+                type="button"
+                onClick={() => setAutoMint(!autoMint)}
+                className="text-gray-600 hover:text-gray-900 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isConnecting}
+              >
+                {autoMint ? (
+                  <ToggleRight className="w-6 h-6 text-indigo-600" />
+                ) : (
+                  <ToggleLeft className="w-6 h-6" />
+                )}
+              </button>
+              <span className="flex items-center gap-2 text-sm font-medium text-gray-700">
+                <Coins className="w-4 h-4" />
+                Auto-approve mint transactions
               </span>
             </label>
           </div>

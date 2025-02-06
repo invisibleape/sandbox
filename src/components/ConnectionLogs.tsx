@@ -1,5 +1,6 @@
 import React, { useRef, useEffect } from 'react';
 import { CheckCircle2, XCircle, Loader2, Copy, Check, Trash2 } from 'lucide-react';
+import { supabase } from '../lib/supabase';
 
 export interface ConnectionLog {
   id: string;
@@ -7,6 +8,7 @@ export interface ConnectionLog {
   message: string;
   type: 'info' | 'success' | 'error' | 'pending';
   walletId?: string;
+  details?: any;
 }
 
 interface ConnectionLogsProps {
@@ -20,6 +22,7 @@ export function ConnectionLogs({ logs, maxHeight = "24rem", onClearLogs }: Conne
   const [copied, setCopied] = React.useState(false);
   const [autoScroll, setAutoScroll] = React.useState(true);
   const lastScrollTop = useRef(0);
+  const [isDeleting, setIsDeleting] = React.useState(false);
 
   // Auto-scroll to bottom when new logs arrive
   useEffect(() => {
@@ -37,7 +40,6 @@ export function ConnectionLogs({ logs, maxHeight = "24rem", onClearLogs }: Conne
     const isScrollingUp = scrollTop < lastScrollTop.current;
     const isAtBottom = scrollHeight - clientHeight <= scrollTop + 1;
 
-    // Only update autoScroll if user is actively scrolling up or down
     if (isScrollingUp) {
       setAutoScroll(false);
     } else if (isAtBottom) {
@@ -57,8 +59,19 @@ export function ConnectionLogs({ logs, maxHeight = "24rem", onClearLogs }: Conne
         second: '2-digit',
         fractionalSecondDigits: 3
       });
-      return `[${timestamp}] ${log.type.toUpperCase()}: ${log.message}`;
-    }).join('\n');
+      
+      let logText = `[${timestamp}] ${log.type.toUpperCase()}: ${log.message}`;
+      
+      // Include details if they exist
+      if (log.details) {
+        logText += '\n' + JSON.stringify(log.details, null, 2)
+          .split('\n')
+          .map(line => '  ' + line) // Indent details
+          .join('\n');
+      }
+      
+      return logText;
+    }).join('\n\n');
 
     try {
       await navigator.clipboard.writeText(formattedLogs);
@@ -69,13 +82,44 @@ export function ConnectionLogs({ logs, maxHeight = "24rem", onClearLogs }: Conne
     }
   };
 
-  const handleClearLogs = () => {
-    if (onClearLogs) {
-      // Ask for confirmation before clearing logs
-      if (logs.length > 0 && window.confirm('Are you sure you want to clear all logs?')) {
+  const handleClearLogs = async () => {
+    if (!onClearLogs || isDeleting) return;
+
+    if (logs.length > 0 && window.confirm('Are you sure you want to clear all logs? This will delete them from the database.')) {
+      setIsDeleting(true);
+      try {
+        // Get unique wallet IDs from logs
+        const walletIds = [...new Set(logs.map(log => log.walletId).filter(Boolean))];
+        
+        // Delete logs from database for each wallet
+        for (const walletId of walletIds) {
+          const { error } = await supabase
+            .from('wallet_logs')
+            .delete()
+            .eq('wallet_id', walletId);
+          
+          if (error) {
+            throw error;
+          }
+        }
+
+        // Call the onClearLogs callback to clear the UI
         onClearLogs();
-        setAutoScroll(true); // Reset auto-scroll when clearing logs
+        setAutoScroll(true);
+      } catch (error) {
+        console.error('Failed to clear logs:', error);
+        alert('Failed to clear logs. Please try again.');
+      } finally {
+        setIsDeleting(false);
       }
+    }
+  };
+
+  const formatLogDetails = (details: any): string => {
+    try {
+      return JSON.stringify(details, null, 2);
+    } catch (error) {
+      return '[Unable to format details]';
     }
   };
 
@@ -119,10 +163,15 @@ export function ConnectionLogs({ logs, maxHeight = "24rem", onClearLogs }: Conne
         {onClearLogs && (
           <button
             onClick={handleClearLogs}
-            className="p-1.5 text-gray-500 hover:text-red-600 bg-white/90 hover:bg-white rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm"
+            disabled={isDeleting}
+            className="p-1.5 text-gray-500 hover:text-red-600 bg-white/90 hover:bg-white rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm disabled:opacity-50"
             title="Clear logs"
           >
-            <Trash2 className="w-4 h-4" />
+            {isDeleting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Trash2 className="w-4 h-4" />
+            )}
           </button>
         )}
       </div>
@@ -167,15 +216,20 @@ export function ConnectionLogs({ logs, maxHeight = "24rem", onClearLogs }: Conne
                     })}
                   </span>
                 </div>
-                <span className={`
+                <div className={`
                   ${log.type === 'success' && 'text-green-700 font-medium'}
                   ${log.type === 'error' && 'text-red-700 font-medium'}
                   ${log.type === 'pending' && 'text-blue-700 font-medium'}
                   ${log.type === 'info' && 'text-gray-900'}
                   break-all leading-relaxed
                 `}>
-                  {log.message}
-                </span>
+                  <span className="whitespace-pre-wrap">{log.message}</span>
+                  {log.details && (
+                    <pre className="mt-1 text-xs text-gray-600 overflow-x-auto whitespace-pre-wrap">
+                      {formatLogDetails(log.details)}
+                    </pre>
+                  )}
+                </div>
               </div>
             </div>
           ))}

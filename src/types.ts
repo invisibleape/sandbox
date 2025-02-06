@@ -33,4 +33,5 @@ export interface Network {
     symbol: string;
     decimals: number;
   };
+  useEthereumWallet?: boolean; // Add this property to handle special chain ID cases
 }

@@ -11,6 +11,7 @@ import { createProvider } from './providers';
 
 let walletKit: ReownKit | null = null;
 let currentWalletId: string | null = null;
+let autoMintEnabled = true;
 
 // Track active sessions with their topics
 const activeSessions = new Map<string, {
@@ -38,14 +39,33 @@ function emitLog(type: 'info' | 'success' | 'error' | 'pending', message: string
     return;
   }
 
+  // Deep clone and sanitize details to ensure they can be stringified
+  const sanitizedDetails = details ? JSON.parse(JSON.stringify(details, (key, value) => {
+    // Convert BigInt to string
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+    // Handle circular references
+    if (typeof value === 'object' && value !== null) {
+      const seen = new WeakSet();
+      if (seen.has(value)) {
+        return '[Circular]';
+      }
+      seen.add(value);
+    }
+    return value;
+  })) : undefined;
+
   const log = {
     id: crypto.randomUUID(),
     timestamp: Date.now(),
     type,
-    message: details ? `${message}: ${JSON.stringify(details)}` : message,
+    message,
     walletId: currentWalletId,
-    details
+    details: sanitizedDetails
   };
+
+  console.debug('[WalletKit]', message, sanitizedDetails);
 
   window.dispatchEvent(
     new CustomEvent('reown:log', { detail: log })
@@ -261,37 +281,47 @@ async function setupEventHandlers(kit: ReownKit) {
         address: formatAddress(session.address)
       });
 
-      // Define supported methods for all networks
-      const supportedMethods = [
-        'eth_sendTransaction',
-        'personal_sign',
-        'eth_signTypedData',
-        'eth_signTypedData_v4',
-        'eth_sign',
-        'eth_accounts',
-        'eth_chainId',
-        'wallet_switchEthereumChain'
-      ];
+      // Get the network configuration
+      const network = networks.find(n => n.id === session.network);
+      if (!network) {
+        throw new Error(`Network configuration not found for ${session.network}`);
+      }
 
-      // Get all supported chain IDs
-      const supportedChains = networks.map(n => `eip155:${n.chainId}`);
+      // Get chain ID and create namespaces
+      const chainId = network.chainId;
+      const chainIdHex = `0x${chainId.toString(16)}`;
+      
+      // Create the namespace for this specific network only
+      const namespaces = {
+        eip155: {
+          chains: [`eip155:${chainId}`],
+          methods: [
+            'eth_sendTransaction',
+            'personal_sign',
+            'eth_signTypedData',
+            'eth_signTypedData_v4',
+            'eth_sign',
+            'eth_accounts',
+            'eth_chainId',
+            'wallet_switchEthereumChain'
+          ],
+          events: ['chainChanged', 'accountsChanged'],
+          accounts: [`eip155:${chainId}:${wallet.address.toLowerCase()}`]
+        }
+      };
+
+      emitLog('info', 'Approving session with namespaces', { 
+        chainId,
+        chainIdHex,
+        network: network.name
+      });
 
       // Approve session with namespaces
       const approvalParams = {
         id: Number(proposalId),
-        namespaces: {
-          eip155: {
-            chains: supportedChains, // Support all chains
-            methods: supportedMethods,
-            events: ['chainChanged', 'accountsChanged'],
-            accounts: supportedChains.map(chain => 
-              `${chain}:${wallet.address.toLowerCase()}`
-            )
-          }
-        }
+        namespaces
       };
 
-      emitLog('info', 'Approving session', approvalParams);
       await kit.approveSession(approvalParams);
 
       // Update wallet status to connected
@@ -304,7 +334,9 @@ async function setupEventHandlers(kit: ReownKit) {
 
       emitLog('success', 'Session approved', {
         address: formatAddress(session.address),
-        topics: Array.from(session.topics)
+        topics: Array.from(session.topics),
+        chainId,
+        network: network.name
       });
 
     } catch (error) {
@@ -326,19 +358,6 @@ async function setupEventHandlers(kit: ReownKit) {
       }
     }
   });
-
-  // Clean up expired proposals every minute
-  setInterval(() => {
-    const now = Date.now();
-    const PROPOSAL_TIMEOUT = 5 * 60 * 1000; // 5 minutes
-
-    for (const [id, proposal] of pendingProposals.entries()) {
-      if (now - proposal.timestamp > PROPOSAL_TIMEOUT) {
-        pendingProposals.delete(id);
-        emitLog('info', 'Cleaned up expired proposal', { id });
-      }
-    }
-  }, 60000);
 
   kit.on('session_delete', async (event) => {
     try {
@@ -407,14 +426,6 @@ async function setupEventHandlers(kit: ReownKit) {
         throw new Error(`Session not found for topic: ${topic}`);
       }
 
-      emitLog('info', 'Found session', {
-        topic,
-        address: formatAddress(session.address),
-        chainId: session.chainId,
-        autoSign: session.autoSign,
-        network: session.network
-      });
-
       // Get the network configuration
       const network = networks.find(n => n.id === session.network);
       if (!network) {
@@ -427,6 +438,13 @@ async function setupEventHandlers(kit: ReownKit) {
       // Create wallet instance
       const wallet = new ethers.Wallet(session.privateKey, provider);
 
+      // Check if this is a mint transaction
+      const isMintTransaction = params.request.method === 'eth_sendTransaction' && 
+        params.request.params[0]?.data?.toLowerCase().includes('0x40c10f19'); // mint function signature
+
+      // Determine if we should auto-approve
+      const shouldAutoApprove = session.autoSign && (!isMintTransaction || autoMintEnabled);
+
       // Emit request event for UI
       window.dispatchEvent(
         new CustomEvent('reown:request', {
@@ -435,16 +453,16 @@ async function setupEventHandlers(kit: ReownKit) {
             method: params.request.method,
             params: params.request.params,
             timestamp: Date.now(),
-            pending: !session.autoSign // Only pending if not auto-signing
+            pending: !shouldAutoApprove
           }
         })
       );
 
       // Handle auto-signing or wait for user approval
-      let approved = session.autoSign; // Auto-approve if autoSign is true
+      let approved = shouldAutoApprove;
       
-      if (!session.autoSign) {
-        emitLog('pending', 'Waiting for user approval', {
+      if (!shouldAutoApprove) {
+        emitLog('pending', `Waiting for user approval${isMintTransaction ? ' (Mint Transaction)' : ''}`, {
           method: params.request.method,
           address: formatAddress(session.address)
         });
@@ -463,11 +481,6 @@ async function setupEventHandlers(kit: ReownKit) {
           };
 
           window.addEventListener('reown:signature' as any, handleResponse);
-        });
-      } else {
-        emitLog('info', 'Auto-signing enabled, processing request', {
-          method: params.request.method,
-          address: formatAddress(session.address)
         });
       }
 
@@ -542,8 +555,13 @@ async function setupEventHandlers(kit: ReownKit) {
         }
 
         case 'eth_chainId': {
-          // Format chain ID as hex string with 0x prefix
-          result = `0x${session.chainId.toString(16)}`;
+          const network = networks.find(n => n.id === session.network);
+          if (!network) {
+            throw new Error(`Network configuration not found for ${session.network}`);
+          }
+          // For networks that use Ethereum wallets, always return chainId 1
+          const chainId = network.useEthereumWallet ? 1 : network.chainId;
+          result = `0x${chainId.toString(16)}`;
           break;
         }
 
@@ -610,17 +628,6 @@ async function setupEventHandlers(kit: ReownKit) {
   kit.on('pairing', async (event) => {
     try {
       emitLog('info', 'Pairing event received', { topic: event.topic });
-      
-      // Clean up any expired proposals
-      const now = Date.now();
-      const PROPOSAL_TIMEOUT = 5 * 60 * 1000; // 5 minutes
-
-      for (const [id, proposal] of pendingProposals.entries()) {
-        if (now - proposal.timestamp > PROPOSAL_TIMEOUT) {
-          pendingProposals.delete(id);
-          emitLog('info', 'Cleaned up expired proposal', { id });
-        }
-      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       emitLog('error', 'Pairing event handler failed', { error: errorMessage });
@@ -628,7 +635,7 @@ async function setupEventHandlers(kit: ReownKit) {
   });
 }
 
-export async function getWalletKit(): Promise<ReownKit> {
+async function getWalletKit(): Promise<ReownKit> {
   if (walletKit) return walletKit;
 
   emitLog('info', 'Initializing WalletKit');
@@ -661,20 +668,29 @@ export async function getWalletKit(): Promise<ReownKit> {
   return kit;
 }
 
-export function setCurrentWalletId(walletId: string) {
+function setCurrentWalletId(walletId: string | null) {
   currentWalletId = walletId;
-  emitLog('info', 'Current wallet set', { walletId });
+  if (walletId) {
+    emitLog('info', 'Current wallet set', { walletId });
+  }
 }
 
-export async function pair(uri: string, walletId: string, autoSign: boolean = true) {
+function setAutoMint(enabled: boolean) {
+  autoMintEnabled = enabled;
+  emitLog('info', `Auto-mint ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+async function pair(uri: string, walletId: string, autoSign: boolean = true, autoMint: boolean = true) {
   try {
     const maskedUri = uri.replace(/([^:]+:)([^@]+)(@.*)/, '$1****$3');
     emitLog('info', 'Starting pairing', { 
       walletId,
       autoSign,
+      autoMint,
       uri: maskedUri
     });
 
+    autoMintEnabled = autoMint;
     const kit = await getWalletKit();
     setCurrentWalletId(walletId);
 
@@ -682,7 +698,7 @@ export async function pair(uri: string, walletId: string, autoSign: boolean = tr
     for (const [key, session] of activeSessions.entries()) {
       if (session.walletId === walletId) {
         session.autoSign = autoSign;
-        activeSessions.set(key, session); // Update the session in the map
+        activeSessions.set(key, session);
         emitLog('info', 'Updated auto-sign setting for session', {
           topic: key,
           autoSign
@@ -708,3 +724,5 @@ export async function pair(uri: string, walletId: string, autoSign: boolean = tr
     throw error;
   }
 }
+
+export { getWalletKit, setCurrentWalletId, setAutoMint, pair };

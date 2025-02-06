@@ -30,6 +30,69 @@ export async function getBlastApiKey(): Promise<string | null> {
   }
 }
 
+async function createBlastApiProvider(network: Network, apiKey: string): Promise<ethers.JsonRpcProvider> {
+  // Map network to BlastAPI endpoint
+  const networkMap: { [key: string]: string } = {
+    'ethereum': 'eth-mainnet',
+    'bnb': 'bsc-mainnet',
+    'polygon': 'polygon-mainnet',
+    'arbitrum': 'arbitrum-one',
+    'avalanche': 'avalanche-mainnet',
+    'base': 'base-mainnet',
+    'linea': 'linea-mainnet',
+    'blast': 'blast-mainnet',
+    'celo': 'celo-mainnet'
+  };
+
+  const blastNetwork = networkMap[network.id];
+  if (!blastNetwork) {
+    throw new Error(`Network ${network.id} is not supported by BlastAPI`);
+  }
+
+  const blastUrl = `https://${blastNetwork}.blastapi.io/${apiKey}`;
+  
+  const provider = new ethers.JsonRpcProvider(blastUrl, {
+    chainId: network.chainId,
+    name: network.name,
+    ensAddress: null,
+    skipFetchSetup: true,
+    staticNetwork: true,
+    headers: {
+      'Accept': '*/*',
+      'Origin': window.location.origin
+    }
+  });
+
+  // Test connection with retry and timeout
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          controller.abort();
+          reject(new Error('Provider connection timeout'));
+        }, 10000);
+      });
+
+      const networkPromise = provider.getNetwork();
+
+      await Promise.race([networkPromise, timeoutPromise]);
+      return provider;
+    } catch (error) {
+      lastError = error;
+      console.warn(`Provider connection attempt ${attempt} failed:`, error);
+      
+      if (attempt < 3) {
+        // Wait before retrying with exponential backoff
+        await new Promise(resolve => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+      }
+    }
+  }
+
+  throw lastError || new Error(`Failed to connect to BlastAPI for ${network.name}`);
+}
+
 export async function createProvider(network: Network): Promise<ethers.JsonRpcProvider> {
   // For SKALE, always use the direct RPC URL with custom network configuration
   if (network.id === 'skale') {
@@ -38,35 +101,14 @@ export async function createProvider(network: Network): Promise<ethers.JsonRpcPr
         chainId: network.chainId,
         name: network.name,
         ensAddress: null,
-        // Add SKALE-specific network configuration
-        skipFetchSetup: true, // Skip initial network detection
-        staticNetwork: true, // Use static network configuration
-        // Add custom headers for SKALE
+        skipFetchSetup: true,
+        staticNetwork: true,
         headers: {
           'Accept': '*/*',
           'Origin': window.location.origin
         }
       });
       
-      // Override getNetwork to always return the correct chain ID
-      const originalGetNetwork = provider.getNetwork.bind(provider);
-      provider.getNetwork = async () => {
-        try {
-          const network = await originalGetNetwork();
-          return {
-            ...network,
-            chainId: BigInt(network.chainId),
-            name: 'skale'
-          };
-        } catch (error) {
-          // Return static network info if RPC call fails
-          return {
-            chainId: BigInt(network.chainId),
-            name: 'skale'
-          };
-        }
-      };
-
       // Test connection but don't fail if it doesn't work
       // SKALE nodes might return errors for some RPC calls
       try {
@@ -82,85 +124,40 @@ export async function createProvider(network: Network): Promise<ethers.JsonRpcPr
     }
   }
 
-  // Try Infura first for supported networks
-  if (['ethereum', 'polygon', 'arbitrum', 'linea', 'base'].includes(network.id)) {
-    try {
-      const infuraKey = await getInfuraKey();
-      if (infuraKey) {
-        const networkMap: { [key: string]: string } = {
-          'ethereum': 'mainnet',
-          'polygon': 'matic',
-          'arbitrum': 'arbitrum',
-          'linea': 'linea',
-          'base': 'base'
-        };
-
-        const provider = new ethers.InfuraProvider(networkMap[network.id], infuraKey);
-        await provider.getNetwork(); // Test connection
-        return provider;
-      }
-    } catch (infuraError) {
-      console.log(`Infura not available for ${network.name}, falling back to BlastAPI`);
-    }
-  }
-
-  // Try BlastAPI for remaining networks
+  // For all other networks, use BlastAPI
   const blastApiKey = await getBlastApiKey();
   if (!blastApiKey) {
-    throw new Error('No API providers available. Please add either a BlastAPI or Infura key to the database.');
+    throw new Error('No BlastAPI key found. Please add a BlastAPI key to the database.');
   }
 
-  // Map network to BlastAPI endpoint
-  const networkMap: { [key: string]: string } = {
-    'ethereum': 'eth',
-    'bnb': 'bsc',
-    'polygon': 'polygon',
-    'arbitrum': 'arbitrum',
-    'avalanche': 'avalanche',
-    'base': 'base',
-    'linea': 'linea',
-    'blast': 'blast',
-    'celo': 'celo'
-  };
-
-  const blastNetwork = networkMap[network.id];
-  if (!blastNetwork) {
-    throw new Error(`Network ${network.id} is not supported by any available provider`);
-  }
-
-  const blastUrl = `https://${blastNetwork}.blastapi.io/${blastApiKey}`;
-  
   try {
-    const provider = new ethers.JsonRpcProvider(blastUrl, {
-      chainId: network.chainId,
-      name: network.name,
-      ensAddress: null
-    });
-    await provider.getNetwork(); // Test connection
-    return provider;
+    return await createBlastApiProvider(network, blastApiKey);
   } catch (error) {
     console.error('Failed to connect to BlastAPI:', error);
-    throw new Error(`Failed to connect to provider for ${network.name}. Please try again later.`);
-  }
-}
+    
+    // Try fallback RPC if available
+    if (network.rpcUrl) {
+      console.log('Attempting to use fallback RPC URL...');
+      try {
+        const provider = new ethers.JsonRpcProvider(network.rpcUrl, {
+          chainId: network.chainId,
+          name: network.name,
+          ensAddress: null,
+          skipFetchSetup: true,
+          staticNetwork: true,
+          headers: {
+            'Accept': '*/*',
+            'Origin': window.location.origin
+          }
+        });
 
-async function getInfuraKey(): Promise<string | null> {
-  try {
-    const { data, error } = await supabase
-      .from('api_keys')
-      .select('key')
-      .eq('provider', 'infura')
-      .eq('is_active', true)
-      .limit(1)
-      .single();
-
-    if (error) {
-      console.error('Error fetching Infura key:', error);
-      return null;
+        await provider.getNetwork();
+        return provider;
+      } catch (fallbackError) {
+        console.error('Fallback RPC also failed:', fallbackError);
+      }
     }
-    return data?.key || null;
-  } catch (error) {
-    console.error('Error fetching Infura key:', error);
-    return null;
+
+    throw new Error(`Failed to connect to provider for ${network.name}. Please try again later.`);
   }
 }

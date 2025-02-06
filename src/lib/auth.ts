@@ -1,6 +1,6 @@
 import { supabase } from './supabase';
 import { Network } from '../types';
-import { getWalletKit, setCurrentWalletId, pair } from './walletkit';
+import { getWalletKit, setCurrentWalletId, setAutoMint, pair } from './walletkit';
 import { decryptPrivateKey } from './crypto';
 import { ConnectionLog } from '../components/ConnectionLogs';
 
@@ -21,7 +21,8 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
     emitLog({
       type: 'info',
       message: `Starting wallet connection process for ${network.name} network...`,
-      walletId
+      walletId,
+      details: { network: network.name, chainId: network.chainId }
     });
 
     // Validate URI format
@@ -61,14 +62,12 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
     emitLog({
       type: 'success',
       message: `Wallet details retrieved successfully for ID: ${walletId}`,
-      walletId
-    });
-
-    // Log wallet details (excluding sensitive data)
-    emitLog({
-      type: 'info',
-      message: `Wallet info - Address: ${wallet.address}, Network: ${wallet.network}, Chain ID: ${wallet.chain_id}`,
-      walletId
+      walletId,
+      details: {
+        address: wallet.address,
+        network: wallet.network,
+        chainId: wallet.chain_id
+      }
     });
 
     // Validate wallet network matches
@@ -77,7 +76,8 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
       emitLog({
         type: 'error',
         message: error,
-        walletId
+        walletId,
+        details: { walletNetwork: wallet.network, requestedNetwork: network.id }
       });
       throw new Error(error);
     }
@@ -108,7 +108,8 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
     emitLog({
       type: 'success',
       message: 'Reown session established successfully',
-      walletId
+      walletId,
+      details: { network: network.name, chainId: network.chainId }
     });
 
   } catch (error) {
@@ -118,7 +119,8 @@ export async function connectWallet(uri: string, walletId: string, network: Netw
     emitLog({
       type: 'error',
       message: errorMessage,
-      walletId
+      walletId,
+      details: { error: errorMessage }
     });
     
     throw new Error(errorMessage);

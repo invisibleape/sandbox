@@ -45,7 +45,7 @@ function Dashboard() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [hasInfuraKey, setHasInfuraKey] = useState(false);
+  const [hasBlastApiKey, setHasBlastApiKey] = useState(false);
   const [stats, setStats] = useState<WalletStats>({
     totalWallets: 0,
     connectedWallets: 0,
@@ -158,12 +158,12 @@ function Dashboard() {
       const { data } = await supabase
         .from('api_keys')
         .select('key')
-        .eq('provider', 'infura')
+        .eq('provider', 'blastapi')
         .eq('is_active', true)
         .limit(1)
         .single();
       
-      setHasInfuraKey(!!data?.key);
+      setHasBlastApiKey(!!data?.key);
       refreshData();
     } else {
       setError('Unable to connect to Supabase. Please check your connection and try again.');
@@ -176,19 +176,13 @@ function Dashboard() {
       return;
     }
 
-    if (!hasInfuraKey) {
-      setError('No Infura API key found. Please add an Infura API key to the database first.');
+    if (!hasBlastApiKey) {
+      setError('No BlastAPI key found. Please add a BlastAPI key to the database first.');
       return;
     }
 
     if (!selectedNetwork) {
       setError('Please select a network first.');
-      return;
-    }
-
-    const supportedNetworks = ['ethereum', 'polygon', 'arbitrum', 'linea', 'base'];
-    if (!supportedNetworks.includes(selectedNetwork.id)) {
-      setError(`${selectedNetwork.name} is not supported by Infura. Please select a supported network.`);
       return;
     }
 
@@ -343,13 +337,13 @@ function Dashboard() {
             </div>
           </div>
 
-          {!hasInfuraKey && (
+          {!hasBlastApiKey && (
             <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-md flex items-start gap-3">
               <AlertCircle className="w-5 h-5 text-yellow-600 mt-0.5 flex-shrink-0" />
               <div>
-                <h3 className="text-sm font-medium text-yellow-800">Infura API Key Required</h3>
+                <h3 className="text-sm font-medium text-yellow-800">BlastAPI Key Required</h3>
                 <p className="mt-1 text-sm text-yellow-600">
-                  An Infura API key is required to generate wallets. Please add an Infura API key to the database first.
+                  A BlastAPI key is required to generate wallets. Please add a BlastAPI key to the database first.
                 </p>
               </div>
             </div>
@@ -387,7 +381,7 @@ function Dashboard() {
                 </div>
                 <button
                   onClick={handleGenerateWallets}
-                  disabled={isGenerating || !isConnected || !selectedNetwork || !hasInfuraKey}
+                  disabled={isGenerating || !isConnected || !selectedNetwork}
                   className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed h-10"
                 >
                   {isGenerating ? (
