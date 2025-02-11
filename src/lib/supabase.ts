@@ -32,55 +32,6 @@ export const supabase = createClient<Database>(
       params: {
         eventsPerSecond: 10
       }
-    },
-    // Add retryable fetch configuration with better error handling
-    fetch: (url, options = {}) => {
-      const MAX_RETRIES = 3;
-      const INITIAL_DELAY = 1000;
-      const MAX_DELAY = 5000;
-      const TIMEOUT = 10000;
-
-      const fetchWithRetry = async (attempt = 0): Promise<Response> => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), TIMEOUT);
-
-        try {
-          const response = await fetch(url, {
-            ...options,
-            signal: controller.signal,
-            headers: {
-              ...options.headers,
-              'Cache-Control': 'no-cache',
-              'Pragma': 'no-cache'
-            }
-          });
-
-          clearTimeout(timeoutId);
-
-          if (!response.ok && attempt < MAX_RETRIES) {
-            const error = await response.text().catch(() => 'Unknown error');
-            throw new Error(`HTTP error! status: ${response.status}, message: ${error}`);
-          }
-
-          return response;
-        } catch (error) {
-          clearTimeout(timeoutId);
-
-          if (error instanceof Error && error.name === 'AbortError') {
-            throw new Error('Request timeout');
-          }
-
-          if (attempt >= MAX_RETRIES) {
-            throw error;
-          }
-
-          const delay = Math.min(INITIAL_DELAY * Math.pow(2, attempt), MAX_DELAY);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          return fetchWithRetry(attempt + 1);
-        }
-      };
-
-      return fetchWithRetry();
     }
   }
 );
@@ -92,62 +43,28 @@ export function isSupabaseConfigured(): boolean {
 
 // Function to test connection with improved error handling
 export async function testSupabaseConnection(): Promise<boolean> {
-  const MAX_RETRIES = 3;
-  const RETRY_DELAY = 1000;
-  const TIMEOUT = 10000;
-  
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), TIMEOUT);
+  return withRetry(async () => {
+    const { data, error } = await supabase
+      .from('wallets')
+      .select('id')
+      .limit(1)
+      .single();
 
-      const { data, error } = await supabase
-        .from('wallets')
-        .select('id')
-        .limit(1)
-        .maybeSingle()
-        .abortSignal(controller.signal);
-
-      clearTimeout(timeoutId);
-
-      if (error) {
-        // PGRST116 means no rows found, which is fine
-        if (error.code === 'PGRST116') {
-          console.log('Supabase connection successful (no rows)');
-          return true;
-        }
-        throw error;
+    if (error) {
+      // PGRST116 means no rows found, which is fine
+      if (error.code === 'PGRST116') {
+        console.log('Supabase connection successful (no rows)');
+        return true;
       }
-
-      console.log('Supabase connection successful');
-      return true;
-    } catch (err) {
-      const isTimeout = err instanceof Error && (
-        err.message === 'Request timeout' || 
-        err.name === 'AbortError'
-      );
-      const isLastAttempt = attempt === MAX_RETRIES - 1;
-      
-      console.error('Connection test error:', {
-        attempt: attempt + 1,
-        error: err instanceof Error ? err.message : 'Unknown error',
-        isTimeout,
-        isLastAttempt
-      });
-      
-      if (!isLastAttempt) {
-        const delay = RETRY_DELAY * Math.pow(2, attempt);
-        console.log(`Retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
-      }
+      throw error;
     }
-  }
-  
-  return false;
+
+    console.log('Supabase connection successful');
+    return true;
+  }, 3, 1000);
 }
 
-// Helper function to handle Supabase requests with retries and timeouts
+// Helper function to handle Supabase requests with retries
 export async function withRetry<T>(
   operation: () => Promise<T>,
   maxRetries: number = 3,
@@ -177,8 +94,9 @@ export async function withRetry<T>(
       
       const isTimeout = lastError.message === 'Operation timeout';
       const isAborted = lastError.name === 'AbortError';
+      const isNetworkError = lastError.message.includes('Failed to fetch');
       
-      if (attempt === maxRetries - 1 || isAborted) {
+      if (attempt === maxRetries - 1 || (!isTimeout && !isNetworkError)) {
         throw lastError;
       }
       

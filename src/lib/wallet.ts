@@ -131,7 +131,7 @@ export async function generateWallets(count: number = 100, network: Network) {
   }
 }
 
-// Get wallet count
+// Get wallet count with retry
 export async function getWalletCount(): Promise<number> {
   return withRetry(async () => {
     console.log('Fetching wallet count...');

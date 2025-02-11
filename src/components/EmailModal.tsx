@@ -1,13 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { X, Loader2, Mail, Trash2, RefreshCw, Copy, CheckCircle } from 'lucide-react';
+import { X, Loader2, Mail, Trash2, RefreshCw, Copy, CheckCircle, User } from 'lucide-react';
 import { generateTempEmail, getWalletEmails, getEmailMessage, deleteEmailMessage } from '../lib/email';
 import { supabase } from '../lib/supabase';
-
-interface EmailModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  walletId: string | null;
-}
 
 interface Email {
   _id: string;
@@ -18,6 +12,18 @@ interface Email {
   mail_timestamp: string;
 }
 
+interface EmailModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  walletId: string | null;
+}
+
+interface WalletProfile {
+  email: string | null;
+  username: string | null;
+  profile_picture_url: string | null;
+}
+
 export function EmailModal({ isOpen, onClose, walletId }: EmailModalProps) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -26,6 +32,7 @@ export function EmailModal({ isOpen, onClose, walletId }: EmailModalProps) {
   const [emails, setEmails] = useState<Email[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [copiedEmail, setCopiedEmail] = useState(false);
+  const [profile, setProfile] = useState<WalletProfile | null>(null);
 
   useEffect(() => {
     if (isOpen && walletId) {
@@ -35,6 +42,7 @@ export function EmailModal({ isOpen, onClose, walletId }: EmailModalProps) {
       setEmails([]);
       setSelectedEmail(null);
       setError(null);
+      setProfile(null);
     }
   }, [isOpen, walletId]);
 
@@ -45,13 +53,20 @@ export function EmailModal({ isOpen, onClose, walletId }: EmailModalProps) {
     try {
       const { data: wallet } = await supabase
         .from('wallets')
-        .select('email')
+        .select('email, username, profile_picture_url')
         .eq('id', walletId)
         .single();
 
-      if (wallet?.email) {
+      if (wallet) {
         setEmail(wallet.email);
-        loadEmails();
+        setProfile({
+          email: wallet.email,
+          username: wallet.username,
+          profile_picture_url: wallet.profile_picture_url
+        });
+        if (wallet.email) {
+          loadEmails();
+        }
       }
     } catch (err) {
       setError('Failed to load email status');
@@ -86,7 +101,23 @@ export function EmailModal({ isOpen, onClose, walletId }: EmailModalProps) {
       if (!generatedEmail) {
         throw new Error('Failed to generate email');
       }
-      setEmail(generatedEmail);
+      
+      // Reload profile data to get new username and profile picture
+      const { data: wallet } = await supabase
+        .from('wallets')
+        .select('email, username, profile_picture_url')
+        .eq('id', walletId)
+        .single();
+
+      if (wallet) {
+        setEmail(wallet.email);
+        setProfile({
+          email: wallet.email,
+          username: wallet.username,
+          profile_picture_url: wallet.profile_picture_url
+        });
+      }
+      
       setError(null);
       loadEmails();
     } catch (err) {
@@ -106,6 +137,17 @@ export function EmailModal({ isOpen, onClose, walletId }: EmailModalProps) {
       setTimeout(() => setCopiedEmail(false), 2000);
     } catch (err) {
       console.error('Failed to copy email:', err);
+    }
+  };
+
+  const handleCopyUsername = async () => {
+    if (!profile?.username) return;
+
+    try {
+      await navigator.clipboard.writeText(profile.username);
+      // You could add a copied state for username too if needed
+    } catch (err) {
+      console.error('Failed to copy username:', err);
     }
   };
 
@@ -154,7 +196,35 @@ export function EmailModal({ isOpen, onClose, walletId }: EmailModalProps) {
           <X className="w-5 h-5" />
         </button>
 
-        <h2 className="text-xl font-semibold mb-4">Temporary Email</h2>
+        <h2 className="text-xl font-semibold mb-4">Temporary Email & Profile</h2>
+
+        {profile && (
+          <div className="mb-4 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center gap-4">
+              {profile.profile_picture_url && (
+                <img
+                  src={profile.profile_picture_url}
+                  alt="Profile"
+                  className="w-16 h-16 rounded-full"
+                />
+              )}
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <User className="w-4 h-4 text-gray-500" />
+                  <span className="font-medium">Username:</span>
+                  <span className="font-mono">{profile.username}</span>
+                  <button
+                    onClick={handleCopyUsername}
+                    className="text-gray-500 hover:text-gray-700"
+                    title="Copy username"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="mb-4">
           {email ? (
@@ -186,7 +256,7 @@ export function EmailModal({ isOpen, onClose, walletId }: EmailModalProps) {
               ) : (
                 <>
                   <Mail className="w-4 h-4 mr-2" />
-                  Generate Email
+                  Generate Email & Profile
                 </>
               )}
             </button>

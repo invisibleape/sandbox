@@ -2,44 +2,75 @@ import { supabase } from './supabase';
 import { formatAddress } from './wallet';
 import { MD5 } from 'crypto-js';
 
-// API configuration
-const TEMP_MAIL_API = {
-  baseUrl: 'https://privatix-temp-mail-v1.p.rapidapi.com/request',
-  host: 'privatix-temp-mail-v1.p.rapidapi.com'
+// API configuration for temp-mail.org
+const EMAIL_API = {
+  baseUrl: 'https://api.temp-mail.org/request',
+  format: 'json',
+  defaultDomain: 'temp-mail.org'
 };
 
-// List of available temp mail domains
-const TEMP_MAIL_DOMAINS = [
-  'mailto.plus',
-  'freeml.net',
-  'rover.info'
+// Adjectives and nouns for username generation
+const ADJECTIVES = [
+  'swift', 'brave', 'mighty', 'noble', 'wise', 'royal', 'solar', 'lunar', 'cosmic',
+  'mystic', 'golden', 'silver', 'crystal', 'shadow', 'storm', 'frost', 'thunder',
+  'stellar', 'astral', 'phoenix'
 ];
 
-// Get API key from Supabase
-async function getTempMailApiKey(): Promise<string> {
-  const { data, error } = await supabase
-    .from('api_keys')
-    .select('key')
-    .eq('provider', 'tempmail')
-    .eq('is_active', true)
-    .single();
+const NOUNS = [
+  'warrior', 'knight', 'sage', 'dragon', 'wolf', 'eagle', 'lion', 'tiger', 'bear',
+  'falcon', 'hawk', 'raven', 'phoenix', 'hunter', 'ranger', 'guardian', 'sentinel',
+  'warden', 'keeper', 'champion'
+];
 
-  if (error || !data?.key) {
-    throw new Error('Failed to get TempMail API key');
+// Generate a unique username
+function generateUsername(): string {
+  const adjective = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+  const number = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+  return `${adjective}${noun}${number}`;
+}
+
+// Generate a profile picture URL using DiceBear
+function generateProfilePicture(username: string): string {
+  return `https://api.dicebear.com/7.x/pixel-art/svg?seed=${username}&backgroundColor=b6e3f4,c0aede,d1d4f9&radius=50`;
+}
+
+// Helper function to make API requests with retries
+async function fetchWithRetry(url: string, options: RequestInit = {}, retries = 3): Promise<Response> {
+  let lastError: Error | null = null;
+
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          ...options.headers
+        }
+      });
+
+      // 404 is a valid response for no emails
+      if (response.ok || response.status === 404) {
+        return response;
+      }
+
+      const errorText = await response.text();
+      throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('Unknown error');
+      console.warn(`Attempt ${i + 1} failed:`, lastError.message);
+
+      if (i === retries - 1) {
+        throw lastError;
+      }
+
+      // Exponential backoff
+      await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
+    }
   }
 
-  return data.key;
-}
-
-// Generate a random domain from the available list
-function getRandomDomain(): string {
-  const index = Math.floor(Math.random() * TEMP_MAIL_DOMAINS.length);
-  return TEMP_MAIL_DOMAINS[index];
-}
-
-// Generate MD5 hash for email
-function generateEmailHash(email: string): string {
-  return MD5(email.toLowerCase().trim()).toString();
+  throw lastError || new Error('Failed after retries');
 }
 
 // Generate a temporary email for a wallet
@@ -48,7 +79,7 @@ export async function generateTempEmail(walletId: string): Promise<string | null
     // Get wallet details
     const { data: wallet, error: fetchError } = await supabase
       .from('wallets')
-      .select('address, email')
+      .select('address, email, username')
       .eq('id', walletId)
       .single();
 
@@ -63,19 +94,27 @@ export async function generateTempEmail(walletId: string): Promise<string | null
     }
 
     // Generate email components
-    const domain = getRandomDomain();
-    const username = `${formatAddress(wallet.address).replace('...', 'x').toLowerCase()}`;
-    const email = `${username}@${domain}`;
-    const emailHash = generateEmailHash(email);
+    const username = formatAddress(wallet.address)
+      .replace('0x', '')
+      .replace('...', 'x')
+      .toLowerCase();
+    const email = `${username}@${EMAIL_API.defaultDomain}`;
+    const emailHash = MD5(email.toLowerCase()).toString();
 
-    // Update wallet with email details
+    // Generate unique username if not exists
+    const dappUsername = wallet.username || generateUsername();
+    const profilePictureUrl = generateProfilePicture(dappUsername);
+
+    // Update wallet with email and profile details
     const { error: updateError } = await supabase
       .from('wallets')
       .update({
         email,
         email_hash: emailHash,
-        email_domain: domain,
-        email_created_at: new Date().toISOString()
+        email_domain: EMAIL_API.defaultDomain,
+        email_created_at: new Date().toISOString(),
+        username: dappUsername,
+        profile_picture_url: profilePictureUrl
       })
       .eq('id', walletId);
 
@@ -101,30 +140,23 @@ export async function getWalletEmails(walletId: string): Promise<any[]> {
       .eq('id', walletId)
       .single();
 
-    if (fetchError || !wallet?.email_hash) {
+    if (fetchError || !wallet?.email || !wallet?.email_hash) {
       console.error('Failed to fetch wallet email:', fetchError);
       return [];
     }
 
-    const apiKey = await getTempMailApiKey();
-
-    // Fetch emails from Privatix API
-    const response = await fetch(
-      `${TEMP_MAIL_API.baseUrl}/mail/id/${wallet.email_hash}/`,
-      { 
-        headers: {
-          'x-rapidapi-host': TEMP_MAIL_API.host,
-          'x-rapidapi-key': apiKey
-        }
-      }
+    // Fetch emails from temp-mail API
+    const response = await fetchWithRetry(
+      `${EMAIL_API.baseUrl}/mail/id/${wallet.email_hash}/format/${EMAIL_API.format}/`
     );
 
-    if (!response.ok) {
-      throw new Error('Failed to fetch emails');
+    if (response.status === 404) {
+      // No emails is a normal condition
+      return [];
     }
 
-    const emails = await response.json();
-    return Array.isArray(emails) ? emails : [];
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
   } catch (error) {
     console.error('Error fetching wallet emails:', error);
     return [];
@@ -137,7 +169,7 @@ export async function getEmailMessage(walletId: string, messageId: string): Prom
     // Get wallet email details
     const { data: wallet, error: fetchError } = await supabase
       .from('wallets')
-      .select('email, email_hash')
+      .select('email_hash')
       .eq('id', walletId)
       .single();
 
@@ -146,24 +178,23 @@ export async function getEmailMessage(walletId: string, messageId: string): Prom
       return null;
     }
 
-    const apiKey = await getTempMailApiKey();
-
     // Fetch specific email message
-    const response = await fetch(
-      `${TEMP_MAIL_API.baseUrl}/mail/id/${wallet.email_hash}/${messageId}/`,
-      { 
-        headers: {
-          'x-rapidapi-host': TEMP_MAIL_API.host,
-          'x-rapidapi-key': apiKey
-        }
-      }
+    const response = await fetchWithRetry(
+      `${EMAIL_API.baseUrl}/source/id/${messageId}/format/${EMAIL_API.format}/`
     );
 
     if (!response.ok) {
       throw new Error('Failed to fetch email message');
     }
 
-    return await response.json();
+    const data = await response.json();
+    return {
+      mail_id: messageId,
+      mail_from: data.from,
+      mail_subject: data.subject,
+      mail_text: data.text || data.html,
+      mail_timestamp: data.date
+    };
   } catch (error) {
     console.error('Error fetching email message:', error);
     return null;
@@ -173,30 +204,9 @@ export async function getEmailMessage(walletId: string, messageId: string): Prom
 // Delete a specific email message
 export async function deleteEmailMessage(walletId: string, messageId: string): Promise<boolean> {
   try {
-    // Get wallet email details
-    const { data: wallet, error: fetchError } = await supabase
-      .from('wallets')
-      .select('email, email_hash')
-      .eq('id', walletId)
-      .single();
-
-    if (fetchError || !wallet?.email_hash) {
-      console.error('Failed to fetch wallet email:', fetchError);
-      return false;
-    }
-
-    const apiKey = await getTempMailApiKey();
-
-    // Delete email message
-    const response = await fetch(
-      `${TEMP_MAIL_API.baseUrl}/delete/id/${wallet.email_hash}/${messageId}/`,
-      { 
-        method: 'DELETE',
-        headers: {
-          'x-rapidapi-host': TEMP_MAIL_API.host,
-          'x-rapidapi-key': apiKey
-        }
-      }
+    // Delete email message using temp-mail API
+    const response = await fetchWithRetry(
+      `${EMAIL_API.baseUrl}/delete/id/${messageId}/format/${EMAIL_API.format}/`
     );
 
     return response.ok;
